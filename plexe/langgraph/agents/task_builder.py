@@ -16,7 +16,7 @@ from plexe.langgraph.config import AgentConfig
 from plexe.langgraph.state import PipelineState, PipelinePhase
 from plexe.langgraph.tools.common import save_artifact
 from plexe.langgraph.tools.dataset_builder import get_csv_files_info
-from plexe.langgraph.tools.task_builder import test_sql_query, register_task_code
+from plexe.langgraph.tools.task_builder import test_sql_query, register_task_code, validate_dataset_timestamps
 from plexe.langgraph.prompts.task_builder import TASK_BUILDER_SYSTEM_PROMPT
 
 logger = logging.getLogger(__name__)
@@ -31,6 +31,7 @@ class TaskBuilderAgent(BaseAgent):
     ):
         tools = [
             get_csv_files_info,
+            validate_dataset_timestamps,
             test_sql_query,
             register_task_code,
             save_artifact,

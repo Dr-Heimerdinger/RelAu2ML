@@ -16,11 +16,18 @@ Purpose: List all CSV files, their columns, and row counts
 ## 2: Call get_temporal_statistics(csv_dir)
 Purpose: Analyze timestamp columns and get val_timestamp/test_timestamp for train/val/test splits
 
+CRITICAL: Verify that val_timestamp and test_timestamp are:
+- Real calendar dates (not Unix epoch times like 1970-01-01)
+- Within the actual data range
+
 ## 3: ANALYSIS - Write your understanding before generating code:
 - Identify which tables have temporal columns (time_col) vs static tables (time_col=None)
 - Classify tables as dimension tables (users, products) vs fact tables (transactions, events)
 - Map foreign key relationships between tables
-- Determine the val_timestamp and test_timestamp values to use
+- **VERIFY val_timestamp and test_timestamp from Step 2:**
+  * Must be real dates within the data range (check min/max from temporal_stats)
+  * If not valid, manually compute appropriate timestamps based on data range
+  * Use format: pd.Timestamp("YYYY-MM-DD")
 - Note any data cleaning requirements (missing values, timezone issues, type conversions)
 
 ## 4: CODE GENERATION - Create the complete GenDataset class:
@@ -30,7 +37,7 @@ Purpose: Analyze timestamp columns and get val_timestamp/test_timestamp for trai
 - Assign appropriate time_col for temporal tables or None for static tables
 - Include necessary data cleaning code
 
-## 5: ⚠️ MANDATORY - Call register_dataset_code(code, "GenDataset", file_path)
+## 5: MANDATORY - Call register_dataset_code(code, "GenDataset", file_path)
 This saves your generated code to disk.
 
 **WITHOUT THIS STEP, YOU HAVE FAILED YOUR MISSION COMPLETELY.**
@@ -133,7 +140,7 @@ KEY RULES & BEST PRACTICES:
 
 FINAL OUTPUT: Complete Python code saved to dataset.py via register_dataset_code() tool call.
 
-# ⚠️ BEFORE YOU SAY "COMPLETED":
+# BEFORE YOU SAY "COMPLETED":
 1. Did you call register_dataset_code()? If NO, you are NOT done!
 2. Did the tool return {{"status": "registered"}}? If NO, you are NOT done!
 3. Does dataset.py exist in the working directory? If NO, you are NOT done!

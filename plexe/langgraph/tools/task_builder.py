@@ -129,3 +129,150 @@ def register_task_code(
         "task_type": task_type,
         "code": code
     }
+
+
+@langchain_tool
+def validate_dataset_timestamps(
+    dataset_file_path: str,
+    csv_dir: str
+) -> Dict[str, Any]:
+    """
+    Validate that dataset timestamps are correctly set.
+    
+    Checks:
+    1. val_timestamp and test_timestamp exist
+    2. Timestamps are real dates within the data range (not Unix epoch)
+    3. Sufficient gap between val and test (at least 30 days for timedelta)
+    
+    Args:
+        dataset_file_path: Path to dataset.py file
+        csv_dir: Directory containing CSV files for temporal range check
+    
+    Returns:
+        Validation results with status and any issues found
+    """
+    import os
+    import ast
+    import pandas as pd
+    
+    try:
+        # Read the dataset file
+        if not os.path.exists(dataset_file_path):
+            return {
+                "status": "error",
+                "error": f"Dataset file not found: {dataset_file_path}"
+            }
+        
+        with open(dataset_file_path, 'r') as f:
+            dataset_code = f.read()
+        
+        # Parse to find val_timestamp and test_timestamp
+        tree = ast.parse(dataset_code)
+        val_ts = None
+        test_ts = None
+        
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Assign):
+                for target in node.targets:
+                    if isinstance(target, ast.Name):
+                        if target.id == 'val_timestamp':
+                            # Extract the timestamp string
+                            if isinstance(node.value, ast.Call):
+                                if len(node.value.args) > 0:
+                                    if isinstance(node.value.args[0], ast.Constant):
+                                        val_ts = node.value.args[0].value
+                        elif target.id == 'test_timestamp':
+                            if isinstance(node.value, ast.Call):
+                                if len(node.value.args) > 0:
+                                    if isinstance(node.value.args[0], ast.Constant):
+                                        test_ts = node.value.args[0].value
+        
+        if not val_ts or not test_ts:
+            return {
+                "status": "error",
+                "error": "Could not find val_timestamp or test_timestamp in dataset.py"
+            }
+        
+        # Parse timestamps
+        val_timestamp = pd.Timestamp(val_ts)
+        test_timestamp = pd.Timestamp(test_ts)
+        
+        issues = []
+        
+        # Check if timestamps are suspiciously close to Unix epoch (1970-01-01)
+        epoch = pd.Timestamp("1970-01-01")
+        if abs((val_timestamp - epoch).days) < 365:
+            issues.append(f"val_timestamp ({val_ts}) is suspiciously close to Unix epoch (1970-01-01)")
+        if abs((test_timestamp - epoch).days) < 365:
+            issues.append(f"test_timestamp ({test_ts}) is suspiciously close to Unix epoch (1970-01-01)")
+        
+        # Check gap between val and test
+        time_diff = (test_timestamp - val_timestamp).days
+        if time_diff < 30:
+            issues.append(
+                f"Gap between val_timestamp and test_timestamp is only {time_diff} days. "
+                f"This is insufficient for tasks with timedelta=30 days. "
+                f"Minimum recommended gap: 30+ days"
+            )
+        
+        # Check against actual data range if CSV files available
+        if csv_dir and os.path.exists(csv_dir):
+            min_date = None
+            max_date = None
+            
+            for f in os.listdir(csv_dir):
+                if f.endswith('.csv'):
+                    try:
+                        df = pd.read_csv(os.path.join(csv_dir, f))
+                        for col in df.columns:
+                            try:
+                                dates = pd.to_datetime(df[col], errors='coerce')
+                                if dates.notna().sum() > len(df) * 0.5:
+                                    col_min = dates.min()
+                                    col_max = dates.max()
+                                    if min_date is None or col_min < min_date:
+                                        min_date = col_min
+                                    if max_date is None or col_max > max_date:
+                                        max_date = col_max
+                            except:
+                                pass
+                    except:
+                        pass
+            
+            if min_date and max_date:
+                if val_timestamp < min_date or val_timestamp > max_date:
+                    issues.append(
+                        f"val_timestamp ({val_ts}) is outside the data range "
+                        f"({min_date.strftime('%Y-%m-%d')} to {max_date.strftime('%Y-%m-%d')})"
+                    )
+                if test_timestamp < min_date or test_timestamp > max_date:
+                    issues.append(
+                        f"test_timestamp ({test_ts}) is outside the data range "
+                        f"({min_date.strftime('%Y-%m-%d')} to {max_date.strftime('%Y-%m-%d')})"
+                    )
+        
+        if issues:
+            return {
+                "status": "invalid",
+                "val_timestamp": val_ts,
+                "test_timestamp": test_ts,
+                "time_diff_days": time_diff,
+                "issues": issues,
+                "recommendation": "Dataset timestamps must be fixed before creating tasks. "
+                                 "Use proper dates within the data range with at least 30 days gap."
+            }
+        
+        return {
+            "status": "valid",
+            "val_timestamp": val_ts,
+            "test_timestamp": test_ts,
+            "time_diff_days": time_diff,
+            "message": "Dataset timestamps are valid"
+        }
+        
+    except Exception as e:
+        return {
+            "status": "error",
+            "error": str(e)
+        }
+

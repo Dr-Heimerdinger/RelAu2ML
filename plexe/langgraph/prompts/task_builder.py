@@ -23,13 +23,17 @@ TASK TYPES & BASE CLASSES:
    - Required: time_col, task_type, timedelta, metrics, eval_k
    - Target is typically a LIST of destination entities
 
-MANDATORY WORKFLOW - EXECUTE ALL 6 STEPS:
+MANDATORY WORKFLOW - EXECUTE ALL 7 STEPS:
 1. Analyze user intent and schema to determine task type
-2. Choose appropriate base class (EntityTask or RecommendationTask)
-3. Design SQL query with proper temporal filtering
-4. test_sql_query(csv_dir, query) - validate SQL syntax
-5. Generate complete GenTask code with correct imports and metrics
-6. MANDATORY - register_task_code(code, "GenTask", file_path, task_type)
+2. **VALIDATE dataset timestamps** using validate_dataset_timestamps(dataset_file, csv_dir):
+   - Check that val_timestamp and test_timestamp are real dates (not 1970-01-01)
+   - Verify timestamps are within the actual data range
+   - If validation fails, STOP and report the issue - dataset must be fixed first
+3. Choose appropriate base class (EntityTask or RecommendationTask)
+4. Design SQL query with proper temporal filtering
+5. test_sql_query(csv_dir, query) - validate SQL syntax
+6. Generate complete GenTask code with correct imports and metrics
+7. MANDATORY - register_task_code(code, "GenTask", file_path, task_type)
    WITHOUT THIS STEP, YOU HAVE FAILED COMPLETELY.
    DO NOT finish without calling this tool!
    DO NOT say "I will generate the code" - ACTUALLY DO IT!
@@ -58,37 +62,34 @@ class GenTask(EntityTask):
     def make_table(self, db: Database, timestamps: "pd.Series[pd.Timestamp]") -> Table:
         timestamp_df = pd.DataFrame({"timestamp": timestamps})
         
-        # Load relevant tables
-        users = db.table_dict["users"].df
+        # Load ONLY relevant tables (don't load all tables)
         activities = db.table_dict["activities"].df
         
+        # STANDARD PATTERN: LEFT JOIN + WHERE IN
+        # This matches 90% of RelBench tasks - predicts for recently active entities only
         df = duckdb.sql(
             f\"\"\"
             SELECT
                 t.timestamp,
-                u.user_id,
+                a.user_id,
                 CAST(
                     CASE WHEN COUNT(a.id) = 0 THEN 1 ELSE 0 END AS INTEGER
                 ) AS churn
             FROM
                 timestamp_df t
-            CROSS JOIN
-                users u
             LEFT JOIN
                 activities a
             ON
-                a.user_id = u.user_id AND
                 a.created_at > t.timestamp AND
                 a.created_at <= t.timestamp + INTERVAL '{self.timedelta}'
             WHERE
-                u.created_at <= t.timestamp
-                AND EXISTS (
-                    SELECT 1 FROM activities 
-                    WHERE user_id = u.user_id 
-                    AND created_at <= t.timestamp
+                a.user_id IN (
+                    SELECT DISTINCT user_id 
+                    FROM activities 
+                    WHERE created_at > t.timestamp - INTERVAL '1 year'
                 )
             GROUP BY
-                t.timestamp, u.user_id
+                t.timestamp, a.user_id
             \"\"\"
         ).df()
         
@@ -203,22 +204,47 @@ SQL PATTERNS & BEST PRACTICES:
    LIST(DISTINCT destination.id) AS destination_id
    ```
 
-5. **Active Entity Filtering** (Important!):
-   ```sql
-   -- Only predict for entities that existed before timestamp
-   WHERE entity.created_at <= t.timestamp
+5. **Active Entity Filtering** (CRITICAL - Choose the Right Pattern!):
    
-   -- Only predict for entities with past activity
-   AND EXISTS (
-       SELECT 1 FROM activity 
-       WHERE activity.entity_id = entity.id 
-       AND activity.time <= t.timestamp
-   )
+   **Pattern A: CROSS JOIN (All Historical Entities)**
+   Use when predicting for ALL entities that ever existed before timestamp:
+   ```sql
+   FROM timestamp_df t
+   CROSS JOIN users u
+   LEFT JOIN activities a ON a.user_id = u.user_id AND a.time > t.timestamp AND a.time <= t.timestamp + INTERVAL 'X'
+   WHERE u.created_at <= t.timestamp
+     AND EXISTS (SELECT 1 FROM activities WHERE user_id = u.user_id AND time <= t.timestamp)
+   GROUP BY t.timestamp, u.user_id
    ```
+   WARNING: This creates MANY rows (all timestamps × all historical entities).
+   Use only when you need to predict for inactive/retired entities.
+   
+   **Pattern B: LEFT JOIN + WHERE IN (Recent Active Entities) - RECOMMENDED**
+   Use when predicting only for RECENTLY ACTIVE entities:
+   ```sql
+   FROM timestamp_df t
+   LEFT JOIN results re ON re.date > t.timestamp AND re.date <= t.timestamp + INTERVAL 'X'
+   WHERE re.entity_id IN (
+       SELECT DISTINCT entity_id 
+       FROM events 
+       WHERE date > t.timestamp - INTERVAL '1 year'  -- or '6 months', '3 months'
+   )
+   GROUP BY t.timestamp, re.entity_id
+   ```
+   PREFERRED: This creates fewer, more relevant rows (only active entities).
+   Better for model quality and training efficiency.
+   
+   **How to Choose:**
+   - Sports/Racing (F1, sports): Use Pattern B (only active drivers/players)
+   - E-commerce: Use Pattern B (only recent shoppers)
+   - Churn prediction: Use Pattern A (need to track all historical users)
+   - Rare events: Use Pattern B (only entities with recent activity)
+   
+   **Default: When in doubt, use Pattern B** - it's more practical and matches most real-world use cases.
 
-6. **CROSS JOIN vs LEFT JOIN**:
-   - Use `CROSS JOIN` for entity table to get all entities
-   - Use `LEFT JOIN` for event tables to allow zero counts/nulls
+6. **JOIN Types**:
+   - Pattern A: `CROSS JOIN` for entity table + `LEFT JOIN` for events
+   - Pattern B: `LEFT JOIN` for events + `WHERE IN` subquery for filtering
 
 KEY RULES:
 1. Class name MUST be GenTask
@@ -231,6 +257,7 @@ KEY RULES:
 8. Set pkey_col=None for prediction tables
 9. For binary classification, cast result: `CAST(... AS INTEGER)`
 10. Test SQL query before finalizing code
+11. **PREFER Pattern B (LEFT JOIN + WHERE IN) over Pattern A (CROSS JOIN) unless explicitly needed**
 
 PARAMETER SELECTION GUIDELINES:
 
