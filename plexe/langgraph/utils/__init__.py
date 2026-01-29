@@ -8,6 +8,12 @@ from plexe.langgraph.utils.callbacks import (
     ChainOfThoughtCallback,
     create_langchain_callbacks,
 )
+from plexe.langgraph.utils.logging_utils import (
+    session_id_var,
+    SessionLogger,
+    log_session_event,
+    setup_session_logging,
+)
 from plexe.langgraph.utils.file_utils import (
     create_working_directory,
     validate_file_exists,
@@ -35,6 +41,11 @@ __all__ = [
     # Callbacks
     "ChainOfThoughtCallback",
     "create_langchain_callbacks",
+    # Logging
+    "session_id_var",
+    "SessionLogger",
+    "log_session_event",
+    "setup_session_logging",
     # File utils
     "create_working_directory",
     "validate_file_exists",

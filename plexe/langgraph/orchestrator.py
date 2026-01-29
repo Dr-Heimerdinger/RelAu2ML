@@ -10,6 +10,8 @@ import os
 from datetime import datetime
 from typing import Optional, Dict, Any, Callable, Literal
 
+from plexe.langgraph.utils.logging_utils import session_id_var
+
 from langgraph.graph import StateGraph, END
 from langgraph.checkpoint.memory import MemorySaver
 
@@ -220,12 +222,14 @@ class PlexeOrchestrator:
         if self.emitter:
             self.emitter.emit_thought("ErrorHandler", f"Handling errors: {errors}")
         
-        retry_count = state.get("metadata", {}).get("retry_count", 0)
+        # Safely get retry_count - handle None case explicitly
+        metadata = state.get("metadata") or {}
+        retry_count = metadata.get("retry_count", 0)
         max_retries = self.config.max_retries
         
         if retry_count < max_retries:
             return {
-                "metadata": {**state.get("metadata", {}), "retry_count": retry_count + 1},
+                "metadata": {**metadata, "retry_count": retry_count + 1},
                 "warnings": [f"Retrying after error (attempt {retry_count + 1}/{max_retries})"],
             }
         
@@ -316,7 +320,9 @@ class PlexeOrchestrator:
     
     def _route_from_error(self, state: PipelineState) -> Literal["retry", "end"]:
         """Route from error handler."""
-        retry_count = state.get("metadata", {}).get("retry_count", 0)
+        # Safely get retry_count - handle None case explicitly
+        metadata = state.get("metadata") or {}
+        retry_count = metadata.get("retry_count", 0)
         if retry_count < self.config.max_retries:
             return "retry"
         return "end"
@@ -362,6 +368,9 @@ class PlexeOrchestrator:
             working_dir = os.path.join("workdir", session_id)
         
         os.makedirs(working_dir, exist_ok=True)
+        
+        # Set session ID for logging
+        session_id_token = session_id_var.set(session_id)
         
         initial_state = create_initial_state(
             session_id=session_id,
@@ -410,6 +419,9 @@ class PlexeOrchestrator:
             Agent response
         """
         config = {"configurable": {"thread_id": session_id}}
+        
+        # Set session ID for logging
+        session_id_var.set(session_id)
         
         try:
             current_state = self.graph.get_state(config)

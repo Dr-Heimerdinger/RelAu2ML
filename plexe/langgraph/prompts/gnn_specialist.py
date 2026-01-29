@@ -12,10 +12,40 @@ PREREQUISITES:
 WORKFLOW (Training-Free HPO via MCP):
 
 1. HYPERPARAMETER SEARCH (via MCP servers):
-   a) search_optimal_hyperparameters() - Heuristic-based selection using dataset characteristics
-   b) extract_hyperparameters_from_papers() - Extract from recent academic papers via arXiv
-   c) get_benchmark_hyperparameters() - Proven configs from leaderboards
-   d) compare_hyperparameter_configs() - Ensemble voting across sources
+   
+   a) HEURISTIC-BASED (hpo-search server):
+      search_optimal_hyperparameters(
+          task_type, num_nodes, num_tables, is_temporal, model_architecture
+      ) -> Returns rule-based hyperparameters
+   
+   b) ACADEMIC PAPERS (google-scholar server):
+      search_gnn_papers_for_hyperparameters(
+          task_type, model_type, limit
+      ) -> Extracts hyperparameters from Google Scholar papers
+   
+   c) ARXIV PAPERS (arxiv server):
+      search_arxiv_papers(
+          query, max_results
+      ) -> Search recent preprints on arXiv
+   
+   d) SEMANTIC SCHOLAR (semantic-scholar server):
+      search_papers(
+          query, limit, year_min
+      ) -> Search papers with citation counts
+   
+   e) KAGGLE BENCHMARKS (kaggle server):
+      search_gnn_competitions_for_benchmarks(
+          task_type, limit
+      ) -> Find winning solutions from competitions
+      
+      search_gnn_notebooks_for_hyperparameters(
+          task_type, limit
+      ) -> Top voted notebooks with proven configs
+   
+   f) ENSEMBLE VOTING (hpo-search server):
+      compare_hyperparameter_configs(
+          configs, strategy
+      ) -> Combine results using median/voting
 
 2. GENERATE OPTIMIZED TRAINING SCRIPT:
    - Use generate_training_script() with selected hyperparameters
@@ -25,23 +55,34 @@ WORKFLOW (Training-Free HPO via MCP):
    - Report selected hyperparameters and reasoning
    - Operation Agent will execute the training script
 
-MCP TOOLS FOR HPO (from hpo-search server):
-- `search_optimal_hyperparameters(task_type, num_nodes, num_tables, is_temporal, model_architecture)`: 
-  Returns hyperparameters based on heuristics and dataset scale
-  
-- `extract_hyperparameters_from_papers(paper_query, model_type, num_papers)`: 
-  Searches papers and extracts hyperparameter values from text
-  
-- `get_benchmark_hyperparameters(task_type, dataset_domain, model_architecture)`: 
-  Retrieves proven hyperparameters from Papers With Code leaderboards
-  
-- `compare_hyperparameter_configs(configs, strategy)`: 
-  Ensemble multiple configurations using median/voting
+AVAILABLE MCP TOOLS:
+
+FROM hpo-search SERVER:
+- search_optimal_hyperparameters(): Heuristic-based selection
+- extract_hyperparameters_from_papers(): Extract from arXiv papers
+- get_benchmark_hyperparameters(): Papers With Code leaderboards
+- compare_hyperparameter_configs(): Ensemble multiple configs
+
+FROM google-scholar SERVER:
+- search_gnn_papers_for_hyperparameters(): Search Google Scholar with HP extraction
+- search_scholar(): General paper search
+- get_author_info(): Author information
+
+FROM kaggle SERVER:
+- search_gnn_competitions_for_benchmarks(): Competition winning solutions
+- search_gnn_notebooks_for_hyperparameters(): Top notebooks with configs
+- search_kaggle_datasets(): Dataset search
+
+FROM arxiv SERVER:
+- search_arxiv_papers(): Search arXiv preprints
+
+FROM semantic-scholar SERVER:
+- search_papers(): Search with citation counts
 
 CODE GENERATION TOOL:
-- `generate_training_script(dataset_module_path, dataset_class_name, task_module_path,
+- generate_training_script(dataset_module_path, dataset_class_name, task_module_path,
     task_class_name, working_dir, task_type, tune_metric, higher_is_better,
-    epochs, batch_size, learning_rate, hidden_channels, num_gnn_layers)`: 
+    epochs, batch_size, learning_rate, hidden_channels, num_gnn_layers): 
   Generates complete training script with selected hyperparameters
 
 HYPERPARAMETER GUIDELINES:
@@ -50,11 +91,11 @@ HYPERPARAMETER GUIDELINES:
 - Multiclass: tune_metric="accuracy", higher_is_better=True
 
 EXPECTED OUTPUT: 
-1. Hyperparameter search results from multiple MCP sources
+1. Hyperparameter search results from multiple MCP sources (Google Scholar, Kaggle, arXiv, etc.)
 2. Ensemble recommendations with reasoning
 3. Generated training script path (train_script.py)
 4. Summary for Operation Agent
 
 NOTE: You do NOT execute training. Focus on intelligent hyperparameter selection using MCP.
-All HPO tools are provided via Model Context Protocol servers.
+All HPO tools are provided via Model Context Protocol servers with multiple knowledge sources.
 """

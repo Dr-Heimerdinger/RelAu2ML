@@ -42,13 +42,6 @@ class RelationalGNNSpecialistAgent(BaseAgent):
         if additional_tools:
             tools.extend(additional_tools)
         
-        # MCP tools for HPO will be loaded automatically by BaseAgent
-        # via MCPManager.initialize() which includes:
-        # - search_optimal_hyperparameters (from hpo-search MCP server)
-        # - extract_hyperparameters_from_papers (from hpo-search MCP server)
-        # - get_benchmark_hyperparameters (from hpo-search MCP server)
-        # - compare_hyperparameter_configs (from hpo-search MCP server)
-        
         super().__init__(
             agent_type="gnn_specialist",
             config=config,
@@ -69,22 +62,37 @@ class RelationalGNNSpecialistAgent(BaseAgent):
         context_parts.append(f"Working directory: {working_dir}")
         context_parts.append(f"CSV directory: {csv_dir}")
         
-        if state.get("dataset_info"):
-            ds = state["dataset_info"]
-            context_parts.append(f"Dataset file: {ds.get('file_path', working_dir + '/dataset.py')}")
-            context_parts.append(f"Dataset class: {ds.get('class_name', 'GenDataset')}")
+        dataset_info = state.get("dataset_info")
+        if dataset_info and isinstance(dataset_info, dict):
+            context_parts.append(f"Dataset file: {dataset_info.get('file_path', working_dir + '/dataset.py')}")
+            context_parts.append(f"Dataset class: {dataset_info.get('class_name', 'GenDataset')}")
+        else:
+            context_parts.append(f"Dataset file: {working_dir}/dataset.py")
+            context_parts.append(f"Dataset class: GenDataset")
         
-        if state.get("task_info"):
-            task = state["task_info"]
-            context_parts.append(f"Task file: {task.get('file_path', working_dir + '/task.py')}")
-            context_parts.append(f"Task class: {task.get('class_name', 'GenTask')}")
-            context_parts.append(f"Task type: {task.get('task_type', 'binary_classification')}")
-        
-        task_type = state.get("task_info", {}).get("task_type", "binary_classification")
+        task_info = state.get("task_info")
+        if task_info and isinstance(task_info, dict):
+            context_parts.append(f"Task file: {task_info.get('file_path', working_dir + '/task.py')}")
+            context_parts.append(f"Task class: {task_info.get('class_name', 'GenTask')}")
+            context_parts.append(f"Task type: {task_info.get('task_type', 'binary_classification')}")
+            task_type = task_info.get("task_type", "binary_classification")
+        else:
+            context_parts.append(f"Task file: {working_dir}/task.py")
+            context_parts.append(f"Task class: GenTask")
+            context_parts.append(f"Task type: binary_classification")
+            task_type = "binary_classification"
         
         # Build dataset characteristics for HPO search
+        # Safely get schema_info - handle None case explicitly
+        schema_info = state.get("schema_info")
+        num_tables = 0
+        if schema_info and isinstance(schema_info, dict):
+            tables = schema_info.get("tables", {})
+            if tables:
+                num_tables = len(tables)
+        
         dataset_chars = {
-            "num_tables": len(state.get("schema_info", {}).get("tables", {})),
+            "num_tables": num_tables,
             "num_nodes": 10000,  # Estimate - would be calculated from schema
             "is_temporal": True,  # Always true for RelBench tasks
         }
@@ -92,33 +100,44 @@ class RelationalGNNSpecialistAgent(BaseAgent):
         context_parts.append(f"""
 EXECUTE THESE STEPS (Training-Free HPO via MCP):
 
-1. SEARCH FOR OPTIMAL HYPERPARAMETERS using MCP tools:
+1. SEARCH FOR OPTIMAL HYPERPARAMETERS using MCP tools from MULTIPLE sources:
    
-   a) search_optimal_hyperparameters(
+   a) HEURISTICS - search_optimal_hyperparameters(
        task_type="{task_type}",
        num_nodes={dataset_chars.get('num_nodes', 10000)},
        num_tables={dataset_chars.get('num_tables', 5)},
        is_temporal={dataset_chars.get('is_temporal', True)},
        model_architecture="gnn"
    )
-   # Returns: Heuristic-based hyperparameters with reasoning
+   # Returns: Rule-based hyperparameters
    
-   b) extract_hyperparameters_from_papers(
-       paper_query="Relational GNN {task_type} temporal graphs",
-       model_type="gnn",
-       num_papers=5
-   )
-   # Returns: Hyperparameters extracted from recent papers
-   
-   c) get_benchmark_hyperparameters(
+   b) GOOGLE SCHOLAR - search_gnn_papers_for_hyperparameters(
        task_type="{task_type}",
-       dataset_domain="relational",
-       model_architecture="gnn"
+       model_type="Graph Neural Network",
+       limit=5
    )
-   # Returns: Benchmark-proven hyperparameters
+   # Returns: Hyperparameters extracted from Google Scholar papers with citations
    
-   d) compare_hyperparameter_configs(
-       configs=[results_from_a, results_from_b, results_from_c],
+   c) KAGGLE BENCHMARKS - search_gnn_competitions_for_benchmarks(
+       task_type="{task_type}",
+       limit=3
+   )
+   # Returns: Winning solutions from Kaggle competitions
+   
+   d) KAGGLE NOTEBOOKS - search_gnn_notebooks_for_hyperparameters(
+       task_type="GNN {task_type}",
+       limit=5
+   )
+   # Returns: Top voted notebooks with proven hyperparameters
+   
+   e) ARXIV PAPERS - search_arxiv_papers(
+       query="Graph Neural Network {task_type} hyperparameters",
+       max_results=5
+   )
+   # Returns: Recent preprints with methodology details
+   
+   f) ENSEMBLE VOTING - compare_hyperparameter_configs(
+       configs=[results_from_a, results_from_b, results_from_c, results_from_d],
        strategy="ensemble_median"
    )
    # Returns: Final recommended hyperparameters via ensemble voting
@@ -130,14 +149,21 @@ EXECUTE THESE STEPS (Training-Free HPO via MCP):
        task_module_path="{working_dir}/task.py",
        task_class_name="GenTask",
        working_dir="{working_dir}",
+       csv_dir="{csv_dir}",
        task_type="{task_type}",
-       **recommended_hyperparameters  # Use result from step 1d
+       **recommended_hyperparameters  # Use result from step 1f
    )
 
-3. Report the selected hyperparameters with reasoning from all sources
+3. Report the selected hyperparameters with reasoning from all sources:
+   - Google Scholar papers (academic consensus)
+   - Kaggle competitions (proven winners)
+   - Kaggle notebooks (community best practices)
+   - arXiv preprints (cutting-edge research)
+   - Heuristic rules (dataset-specific)
 
 NOTE: 
 - All HPO tools are provided via MCP (Model Context Protocol)
+- You have access to 5 knowledge sources: Google Scholar, Kaggle, arXiv, Semantic Scholar, Papers With Code
 - Training execution will be handled by the Operation Agent
 - Focus on selecting optimal hyperparameters WITHOUT training experiments
 """)

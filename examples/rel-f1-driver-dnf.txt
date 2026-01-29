@@ -1,6 +1,6 @@
 I am working with the data is loaded into the `f1` database (connection string: `postgresql+psycopg2://mlflow:mlflow@postgres:5432/f1`).
 I want to define a predictive task on this relational database.
 - Database Description: The F1 database tracks all-time Formula 1 racing data and statistics. It provides detailed information for various stakeholders including drivers, constructors, engine manufacturers, and tyre manufacturers. Highlights include data on all circuits (e.g. geographical details), and full historical data from every season. This includes overall standings, race results, and more specific data like practice sessions, qualifying positions, sprints, and pit stops.
-- Task definition: For each driver predict the if they will DNF (did not finish) a race in the next 15 days.
+- Task definition: For each driver predict the if they will DNF (did not finish) a race in the next 1 month.
 - Evaluation metric: Area Under the Receiver Operating Characteristic curve (AUROC).
 I don't have any requirements, if you need them you can set by default automatically.

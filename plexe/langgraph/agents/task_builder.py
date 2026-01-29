@@ -6,6 +6,7 @@ generating SQL queries and complete Python Task classes.
 """
 
 import logging
+import os
 from typing import Optional, List, Dict, Any
 
 from langchain_core.tools import BaseTool
@@ -183,16 +184,22 @@ CRITICAL REMINDERS:
         if os.path.exists(task_path):
             task_info["class_name"] = "GenTask"
             task_info["file_path"] = task_path
+            logger.info(f"Task file created at: {task_path}")
             
             intent = state.get("user_intent", {})
             if isinstance(intent, dict):
                 task_info["task_type"] = intent.get("task_type", "binary_classification")
             else:
                 task_info["task_type"] = "binary_classification"
-        
-        if not task_info:
+        else:
+            error_msg = f"CRITICAL ERROR: Task file not found at {task_path}. TaskBuilderAgent did not complete its task. The agent must call register_task_code() to generate task.py."
+            logger.error(error_msg)
+            # Return error state to force re-invocation or escalation
+            base_result["error"] = error_msg
+            base_result["status"] = "error"
             task_info["class_name"] = "GenTask"
             task_info["file_path"] = task_path
+            task_info["error"] = "File not generated"
             task_info["task_type"] = "binary_classification"
         
         base_result["task_info"] = task_info

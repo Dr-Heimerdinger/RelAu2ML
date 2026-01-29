@@ -135,7 +135,11 @@ FINALIZE PIPELINE:
     def generate_inference_code(self, state: PipelineState) -> str:
         """Generate inference code for the trained model."""
         working_dir = state.get("working_dir", ".")
-        task_type = state.get("task_info", {}).get("task_type", "regression")
+        # Safely get task_type - handle None case explicitly
+        task_info = state.get("task_info")
+        task_type = "regression"
+        if task_info and isinstance(task_info, dict):
+            task_type = task_info.get("task_type", "regression")
         
         inference_code = f'''"""
 Auto-generated inference code for the trained GNN model.

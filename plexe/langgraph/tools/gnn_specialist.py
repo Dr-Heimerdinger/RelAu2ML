@@ -8,6 +8,7 @@ def generate_training_script(
     task_module_path: str,
     task_class_name: str,
     working_dir: str,
+    csv_dir: str = None,
     task_type: str = "regression",
     tune_metric: str = "mae",
     higher_is_better: bool = False,
@@ -27,6 +28,7 @@ def generate_training_script(
         task_module_path: Path to the Task Python module
         task_class_name: Name of the Task class
         working_dir: Working directory for outputs
+        csv_dir: Path to CSV files directory (defaults to working_dir/csv_files)
         task_type: Type of task (regression, binary_classification, multiclass_classification)
         tune_metric: Metric to optimize
         higher_is_better: Whether higher metric values are better
@@ -41,6 +43,10 @@ def generate_training_script(
         Path to generated script
     """
     import os
+    
+    # Use csv_dir from parameter or default to working_dir/csv_files
+    if csv_dir is None:
+        csv_dir = f"{working_dir}/csv_files"
     
     script_template = f'''"""
 Auto-generated GNN training script using plexe.relbench.modeling.
@@ -67,7 +73,7 @@ from torch_geometric.loader import NeighborLoader
 device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 print(f"Using device: {{device}}")
 
-csv_dir = "{working_dir}/csv_files"
+csv_dir = "{csv_dir}"
 dataset = {dataset_class_name}(csv_dir=csv_dir)
 task = {task_class_name}(dataset)
 db = dataset.get_db()
@@ -242,6 +248,7 @@ with open("{working_dir}/training_results.json", "w") as f:
 print(f"\\nTraining complete! Results saved to {working_dir}/training_results.json")
 '''
     
+    # Use the working_dir directly - it's passed from the state
     script_path = os.path.join(working_dir, "train_script.py")
     os.makedirs(working_dir, exist_ok=True)
     

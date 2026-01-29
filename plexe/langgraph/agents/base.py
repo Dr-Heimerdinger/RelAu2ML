@@ -38,30 +38,118 @@ def extract_text_content(content) -> str:
 class AgentCallbackHandler(BaseCallbackHandler):
     """Callback handler for agent events with detailed chain-of-thought."""
     
-    def __init__(self, agent_name: str, emitter: Optional[BaseEmitter] = None):
+    def __init__(self, agent_name: str, emitter: Optional[BaseEmitter] = None, model_id: str = ""):
         self.agent_name = agent_name
         self.emitter = emitter
+        self.model_id = model_id
         self.current_thought = ""
+        self._llm_start_emitted = False
+        self._last_emitted_text = ""  # Track to avoid duplicate emissions
     
     def on_llm_start(self, serialized, prompts, **kwargs):
-        if self.emitter:
-            model_name = ""
-            if isinstance(serialized, dict):
-                model_name = serialized.get("name", serialized.get("id", ["unknown"])[-1] if isinstance(serialized.get("id"), list) else "")
-            self.emitter.emit_thought(self.agent_name, f"Thinking with {model_name}..." if model_name else "Analyzing...")
+        # Don't emit "Thinking..." - wait for actual response
+        self._llm_start_emitted = True
     
     def on_llm_end(self, response, **kwargs):
-        if self.emitter and response and response.generations:
-            try:
-                text = extract_text_content(response.generations[0][0].text)
-                if text:
-                    cleaned = text.strip()
-                    if len(cleaned) > 300:
-                        cleaned = cleaned[:300] + "..."
-                    self.current_thought = cleaned
-                    self.emitter.emit_thought(self.agent_name, f"Reasoning: {cleaned}")
-            except Exception as e:
-                logger.debug(f"Error extracting LLM response: {e}")
+        if not self.emitter or not response or not response.generations:
+            return
+        
+        try:
+            generation = response.generations[0][0]
+            text = None
+            thinking_text = None
+            
+            # Extract thinking/reasoning from extended thinking models (Claude, etc.)
+            if hasattr(generation, 'message'):
+                message = generation.message
+                # Check for thinking blocks (extended thinking)
+                if hasattr(message, 'content') and isinstance(message.content, list):
+                    for block in message.content:
+                        if isinstance(block, dict):
+                            if block.get("type") == "thinking":
+                                thinking_text = block.get("thinking", "")
+                            elif block.get("type") == "text":
+                                text = block.get("text", "")
+                elif hasattr(message, 'content'):
+                    text = extract_text_content(message.content)
+                
+                # Also check additional_kwargs for reasoning (Gemini, DeepSeek, etc.)
+                if hasattr(message, 'additional_kwargs'):
+                    kwargs_data = message.additional_kwargs
+                    # DeepSeek reasoning
+                    if 'reasoning_content' in kwargs_data:
+                        thinking_text = kwargs_data['reasoning_content']
+                    # Gemini thinking in response_metadata
+                    if hasattr(message, 'response_metadata'):
+                        metadata = message.response_metadata or {}
+                        # Some models put thinking in candidates
+                        if 'candidates' in metadata:
+                            for candidate in metadata.get('candidates', []):
+                                if 'content' in candidate:
+                                    parts = candidate['content'].get('parts', [])
+                                    for part in parts:
+                                        if part.get('thought'):
+                                            thinking_text = part.get('text', '')
+            
+            # Fallback to text extraction
+            if not text and hasattr(generation, 'text') and generation.text:
+                text = extract_text_content(generation.text)
+            
+            # Determine what to emit - prefer thinking, fallback to text
+            emit_text = thinking_text or text
+            if not emit_text:
+                return
+            
+            # Avoid duplicate emissions
+            emit_text = emit_text.strip()
+            if emit_text == self._last_emitted_text:
+                return
+            self._last_emitted_text = emit_text
+            
+            # Skip if it looks like a tool call response (starts with JSON or action)
+            if emit_text.startswith('{') or emit_text.startswith('Action:'):
+                return
+            
+            # Use full text without truncation for UI display
+            display_text = emit_text
+            
+            self.current_thought = display_text
+            model_info = f" [{self.model_id}]" if self.model_id else ""
+            
+            # Extract token usage if available
+            token_usage = None
+            if hasattr(response, 'llm_output') and response.llm_output:
+                # Some LLMs return token_usage in llm_output
+                token_usage = response.llm_output.get('token_usage')
+            elif hasattr(generation, 'message'):
+                message = generation.message
+                # Check for usage_metadata (LangChain standard as of 0.2+)
+                if hasattr(message, 'usage_metadata') and message.usage_metadata:
+                    usage = message.usage_metadata
+                    # usage_metadata is a TypedDict with keys: input_tokens, output_tokens, total_tokens
+                    token_usage = {
+                        'prompt_tokens': usage.get('input_tokens', 0),
+                        'completion_tokens': usage.get('output_tokens', 0),
+                        'total_tokens': usage.get('total_tokens', 0)
+                    }
+                # Fallback: Check response_metadata for usage info (older format)
+                elif hasattr(message, 'response_metadata') and message.response_metadata:
+                    metadata = message.response_metadata
+                    if 'usage' in metadata:
+                        usage = metadata['usage']
+                        token_usage = {
+                            'prompt_tokens': usage.get('prompt_tokens', 0),
+                            'completion_tokens': usage.get('completion_tokens', 0),
+                            'total_tokens': usage.get('total_tokens', 0)
+                        }
+            
+            if thinking_text:
+                self.emitter.emit_thought(self.agent_name, f"💭 Reasoning{model_info}:\n{display_text}", token_usage)
+            else:
+                self.emitter.emit_thought(self.agent_name, f"💡 Analysis{model_info}:\n{display_text}", token_usage)
+                
+        except Exception as e:
+            logger.debug(f"Error extracting LLM response: {e}")
     
     def on_tool_start(self, serialized, input_str, **kwargs):
         if self.emitter:
@@ -112,26 +200,39 @@ class BaseAgent(ABC):
         self.agent_type = agent_type
         self.config = config or AgentConfig.from_env()
         self.emitter = emitter
+        self.tools = tools or []
         
-        # Initialize MCP Manager and load tools
+        # Initialize MCP Manager and load tools using a thread to avoid event loop conflicts
         import asyncio
+        from concurrent.futures import ThreadPoolExecutor
+        
         self.mcp_manager = MCPManager()
-        try:
-            # We run this in a new loop or the current one to load tools during init
+        
+        def _run_async_init():
+            """Run async MCP initialization in a new event loop within a thread."""
             loop = asyncio.new_event_loop()
-            loop.run_until_complete(self.mcp_manager.initialize())
-            mcp_tools = self.mcp_manager.get_tools()
+            asyncio.set_event_loop(loop)
+            try:
+                loop.run_until_complete(self.mcp_manager.initialize())
+                return self.mcp_manager.get_tools()
+            finally:
+                loop.close()
+        
+        try:
+            with ThreadPoolExecutor(max_workers=1) as executor:
+                future = executor.submit(_run_async_init)
+                mcp_tools = future.result(timeout=30)
             if mcp_tools:
                 logger.info(f"Agent {self.name} loaded {len(mcp_tools)} MCP tools")
                 self.tools.extend(mcp_tools)
         except Exception as e:
             logger.warning(f"Could not load MCP tools for {self.name}: {e}")
             
-        model_id = self.config.get_model_for_agent(agent_type)
-        self.llm = get_llm_from_model_id(model_id, self.config.temperature)
+        self.model_id = self.config.get_model_for_agent(agent_type)
+        self.llm = get_llm_from_model_id(self.model_id, self.config.temperature)
         
         self._agent = None
-        self._callback_handler = AgentCallbackHandler(self.name, emitter)
+        self._callback_handler = AgentCallbackHandler(self.name, emitter, self.model_id)
     
     @property
     @abstractmethod
@@ -152,7 +253,7 @@ class BaseAgent(ABC):
     def set_emitter(self, emitter: BaseEmitter):
         """Set the emitter for progress callbacks."""
         self.emitter = emitter
-        self._callback_handler = AgentCallbackHandler(self.name, emitter)
+        self._callback_handler = AgentCallbackHandler(self.name, emitter, self.model_id)
     
     def get_agent(self):
         """Get or create the LangGraph agent."""
@@ -177,35 +278,46 @@ class BaseAgent(ABC):
         agent = self.get_agent()
         
         messages = self._build_messages(state)
-        logger.info(f"Agent {self.name} invoking with {len(messages)} messages")
+        logger.info(f"Agent {self.name} invoking with {len(messages)} messages using model {self.model_id}")
         
         if self.emitter:
-            self.emitter.emit_agent_start(self.name)
+            self.emitter.emit_agent_start(self.name, self.model_id)
         
         try:
             config = {"callbacks": [self._callback_handler]} if self.emitter else {}
             
             result = None
+            last_valid_output = None
             for chunk in agent.stream({"messages": messages}, config=config, stream_mode="updates"):
                 for node_name, node_output in chunk.items():
-                    if self.emitter and node_name == "agent":
+                    # Store valid outputs (dict with messages)
+                    if isinstance(node_output, dict) and node_output.get("messages"):
+                        last_valid_output = node_output
+                    
+                    if self.emitter and node_name == "agent" and isinstance(node_output, dict):
                         agent_messages = node_output.get("messages", [])
                         for msg in agent_messages:
                             if isinstance(msg, AIMessage):
-                                content = extract_text_content(msg.content)
-                                if content and len(content) > 20:
-                                    self.emitter.emit_thought(self.name, f"Thinking: {content[:400]}")
+                                # Don't emit here - let the callback handler do it
+                                # Just emit tool calls
                                 if hasattr(msg, 'tool_calls') and msg.tool_calls:
                                     for tc in msg.tool_calls:
-                                        tool_name = tc.get("name", "unknown")
-                                        tool_args = tc.get("args", {})
+                                        tool_name = tc.get("name", "unknown") if isinstance(tc, dict) else getattr(tc, 'name', 'unknown')
+                                        tool_args = tc.get("args", {}) if isinstance(tc, dict) else getattr(tc, 'args', {})
                                         self.emitter.emit_tool_call(self.name, tool_name, tool_args)
-                result = node_output
+                    result = node_output
             
-            if result is None:
-                result = agent.invoke({"messages": messages}, config=config)
-            else:
-                result = result if result.get("messages") else {"messages": []}
+            # Use last valid output if final result is None or invalid
+            if result is None or not isinstance(result, dict):
+                if last_valid_output:
+                    result = last_valid_output
+                else:
+                    result = agent.invoke({"messages": messages}, config=config)
+            elif not result.get("messages"):
+                if last_valid_output:
+                    result = last_valid_output
+                else:
+                    result = {"messages": []}
             
             logger.info(f"Agent {self.name} received {len(result.get('messages', []))} response messages")
             
@@ -215,7 +327,7 @@ class BaseAgent(ABC):
                 response_text = ""
                 for msg in processed.get("messages", []):
                     if msg.get("role") == "assistant":
-                        response_text = msg.get("content", "")[:200]
+                        response_text = msg.get("content", "")
                         break
                 self.emitter.emit_agent_end(self.name, response_text)
             

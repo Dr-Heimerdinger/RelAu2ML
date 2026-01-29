@@ -11,11 +11,27 @@ import os
 import re
 from typing import Dict, Any, List, Optional
 from mcp.server.fastmcp import FastMCP
+from pydantic import BaseModel, Field
 import requests
 import xml.etree.ElementTree as ET
 
 # Initialize FastMCP server
 mcp = FastMCP("HPO Search")
+
+
+class HyperparameterConfig(BaseModel):
+    """Hyperparameter configuration from a single source."""
+    hyperparameters: Dict[str, Any] = Field(
+        description="Dictionary of hyperparameter names to values"
+    )
+    source: str = Field(
+        default="unknown",
+        description="Source of this configuration (e.g., 'heuristics', 'literature', 'benchmark')"
+    )
+    confidence: Optional[str] = Field(
+        default=None,
+        description="Confidence level of this configuration"
+    )
 
 
 @mcp.tool()
@@ -285,7 +301,7 @@ def get_benchmark_hyperparameters(
 
 @mcp.tool()
 def compare_hyperparameter_configs(
-    configs: List[Dict[str, Any]],
+    configs: List[HyperparameterConfig],
     strategy: str = "ensemble_median"
 ) -> Dict[str, Any]:
     """
@@ -295,7 +311,8 @@ def compare_hyperparameter_configs(
     benchmarks) to determine optimal hyperparameters.
     
     Args:
-        configs: List of hyperparameter config dicts from different sources
+        configs: List of hyperparameter config objects from different sources.
+                 Each config should have 'hyperparameters' dict, 'source' string, and optional 'confidence'.
         strategy: Strategy for combining configs (ensemble_median, highest_confidence, voting)
     
     Returns:
@@ -313,9 +330,11 @@ def compare_hyperparameter_configs(
     sources = []
     
     for config in configs:
-        if "hyperparameters" in config:
-            all_hyperparams.append(config["hyperparameters"])
-            sources.append(config.get("source", "unknown"))
+        # Handle both Pydantic models and dicts
+        config_dict = config.model_dump() if hasattr(config, 'model_dump') else config
+        if "hyperparameters" in config_dict:
+            all_hyperparams.append(config_dict["hyperparameters"])
+            sources.append(config_dict.get("source", "unknown"))
     
     if not all_hyperparams:
         return {

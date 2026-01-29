@@ -6,7 +6,8 @@ import sys
 from typing import List, Dict, Any, Optional
 from mcp import ClientSession, StdioServerParameters
 from mcp.client.stdio import stdio_client
-from langchain_core.tools import Tool, BaseTool
+from langchain_core.tools import Tool, BaseTool, StructuredTool
+from pydantic import BaseModel, Field, create_model
 from dotenv import load_dotenv
 from contextlib import AsyncExitStack
 
@@ -99,7 +100,7 @@ class MCPManager:
             logger.error(f"Failed to connect to MCP server {name}: {e}")
 
     def _convert_to_langchain_tool(self, session: ClientSession, tool_info: Any) -> BaseTool:
-        """Convert an MCP tool definition to a LangChain BaseTool."""
+        """Convert an MCP tool definition to a LangChain BaseTool with proper schema."""
         import asyncio
         
         async def tool_func_async(**kwargs):
@@ -125,6 +126,61 @@ class MCPManager:
             except Exception as e:
                 return f"MCP tool error: {str(e)}"
 
+        # Check if tool has input schema with multiple properties
+        input_schema = getattr(tool_info, 'inputSchema', None)
+        
+        if input_schema and isinstance(input_schema, dict):
+            properties = input_schema.get('properties', {})
+            required = input_schema.get('required', [])
+            
+            if properties:
+                # Build Pydantic model dynamically for StructuredTool
+                field_definitions = {}
+                for prop_name, prop_info in properties.items():
+                    prop_type = prop_info.get('type', 'string')
+                    prop_desc = prop_info.get('description', '')
+                    
+                    # Map JSON schema types to Python types
+                    type_mapping = {
+                        'string': str,
+                        'integer': int,
+                        'number': float,
+                        'boolean': bool,
+                        'array': list,
+                        'object': dict,
+                    }
+                    python_type = type_mapping.get(prop_type, str)
+                    
+                    # Special handling for array types: ensure items schema is properly specified
+                    if prop_type == 'array':
+                        items_schema = prop_info.get('items')
+                        if items_schema is None or not isinstance(items_schema, dict):
+                            # If items is missing or invalid, default to list of dicts
+                            # This ensures Gemini gets a valid schema
+                            prop_info['items'] = {'type': 'object'}
+                            logger.warning(f"Array parameter '{prop_name}' missing 'items' schema, defaulting to 'object'")
+                        elif 'type' not in items_schema:
+                            # If items exists but lacks 'type', add it
+                            items_schema['type'] = 'object'
+                            logger.warning(f"Array parameter '{prop_name}' items missing 'type', defaulting to 'object'")
+                    
+                    # Use Optional for non-required fields
+                    if prop_name in required:
+                        field_definitions[prop_name] = (python_type, Field(description=prop_desc))
+                    else:
+                        field_definitions[prop_name] = (Optional[python_type], Field(default=None, description=prop_desc))
+                
+                # Create dynamic Pydantic model for args schema
+                ArgsModel = create_model(f'{tool_info.name}Args', **field_definitions)
+                
+                return StructuredTool.from_function(
+                    func=tool_func_sync,
+                    name=tool_info.name,
+                    description=tool_info.description or f"MCP tool: {tool_info.name}",
+                    args_schema=ArgsModel,
+                )
+        
+        # Fallback to simple Tool for tools without complex schema
         return Tool(
             name=tool_info.name,
             description=tool_info.description or f"MCP tool: {tool_info.name}",

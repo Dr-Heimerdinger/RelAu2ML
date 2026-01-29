@@ -6,6 +6,7 @@ generating complete Python Dataset classes for GNN training.
 """
 
 import logging
+import os
 from typing import Optional, List, Dict, Any
 
 from langchain_core.tools import BaseTool
@@ -55,11 +56,17 @@ class DatasetBuilderAgent(BaseAgent):
         """Build context with CSV, schema, and EDA information."""
         context_parts = []
         
-        if state.get("working_dir"):
-            context_parts.append(f"Working directory: {state['working_dir']}")
+        working_dir = state.get('working_dir', '')
+        csv_dir = state.get('csv_dir', '')
         
-        if state.get("csv_dir"):
-            context_parts.append(f"CSV directory: {state['csv_dir']}")
+        # Convert to absolute paths for the agent
+        if working_dir:
+            working_dir = os.path.abspath(working_dir)
+            context_parts.append(f"Working directory: {working_dir}")
+        
+        if csv_dir:
+            csv_dir = os.path.abspath(csv_dir)
+            context_parts.append(f"CSV directory: {csv_dir}")
         
         if state.get("schema_info"):
             schema = state["schema_info"]
@@ -105,17 +112,58 @@ class DatasetBuilderAgent(BaseAgent):
                     if isinstance(info, dict) and info.get("cardinality"):
                         context_parts.append(f"  - {key}: {info['cardinality']}")
         
-        working_dir = state.get('working_dir', '')
-        csv_dir = state.get('csv_dir', '')
-        
         task_instruction = f"""
-YOUR TASK:
-1. Call get_csv_files_info("{csv_dir}") to list all CSV files and columns
-2. Call get_temporal_statistics("{csv_dir}") to analyze timestamps
-3. Generate a complete GenDataset class following the template above
-4. Call register_dataset_code(code, "GenDataset", "{working_dir}/dataset.py") to save it
+YOUR COMPLETE TASK - ALL 5 STEPS ARE MANDATORY 
 
-IMPORTANT: You MUST call register_dataset_code to save the dataset.py file!
+STEP 1: Information Gathering
+Tool: get_csv_files_info("{csv_dir}")
+Purpose: Understand table structure, column names, and row counts for all CSV files
+
+STEP 2: Temporal Analysis
+Tool: get_temporal_statistics("{csv_dir}")
+Purpose: Determine val_timestamp and test_timestamp for train/validation/test splits
+
+STEP 3: Design Analysis (write your analysis explicitly)
+You must analyze and document:
+- Which tables are temporal (have time_col) vs static (time_col=None)
+- Foreign key relationships between tables (which columns reference which tables)
+- The exact val_timestamp and test_timestamp values you will use
+- Any data cleaning requirements (\\N missing values, timezone handling, type conversions)
+- Which tables are dimension tables vs fact tables
+Action: Write out your complete analysis before proceeding to Step 4
+
+STEP 4: Code Generation
+Generate a complete GenDataset class that includes:
+- Class definition extending Dataset
+- val_timestamp = pd.Timestamp("YYYY-MM-DD") using value from Step 2
+- test_timestamp = pd.Timestamp("YYYY-MM-DD") using value from Step 2
+- __init__ method that accepts csv_dir and cache_dir parameters
+- make_db() method that:
+  * Loads all CSV files from Step 1
+  * Applies data cleaning from Step 3
+  * Creates Table objects with correct fkey_col_to_pkey_table mappings
+  * Sets appropriate time_col for each table (or None for static tables)
+  * Returns Database with all tables
+Action: Generate the complete, working Python code now
+
+STEP 5: Code Registration (CRITICAL - DO NOT SKIP)
+Tool: register_dataset_code(code, "GenDataset", "{working_dir}/dataset.py")
+Purpose: Save the generated Python code to the file system
+Action: Call this tool with your complete code from Step 4
+Result: Must return {{"status": "registered", ...}}
+
+CRITICAL REQUIREMENTS:
+- DO NOT STOP after Steps 1-2. You MUST complete ALL 5 STEPS.
+- DO NOT say "I will generate the code" or "Next I'll call the tool" - EXECUTE the actions immediately.
+- The file {working_dir}/dataset.py MUST exist when you finish.
+- Your task is INCOMPLETE without calling register_dataset_code() in Step 5.
+
+SUCCESS CONDITION:
+The register_dataset_code() tool was called and returned success status.
+The file {working_dir}/dataset.py exists and contains valid Python code.
+
+FAILURE CONDITION:
+You stopped before calling register_dataset_code() OR the file was not created.
 """
         context_parts.append(task_instruction)
         
@@ -135,9 +183,14 @@ IMPORTANT: You MUST call register_dataset_code to save the dataset.py file!
             dataset_info["file_path"] = dataset_path
             logger.info(f"Dataset file created at: {dataset_path}")
         else:
-            logger.warning(f"Dataset file not found at: {dataset_path}")
+            error_msg = f"CRITICAL ERROR: Dataset file not found at {dataset_path}. DatasetBuilderAgent did not complete its task. The agent must call register_dataset_code() to generate dataset.py."
+            logger.error(error_msg)
+            # Return error state to force re-invocation or escalation
+            base_result["error"] = error_msg
+            base_result["status"] = "error"
             dataset_info["class_name"] = "GenDataset"
             dataset_info["file_path"] = dataset_path
+            dataset_info["error"] = "File not generated"
         
         base_result["dataset_info"] = dataset_info
         base_result["current_phase"] = PipelinePhase.TASK_BUILDING.value

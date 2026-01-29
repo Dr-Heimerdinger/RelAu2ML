@@ -20,9 +20,13 @@ from fastapi.middleware.cors import CORSMiddleware
 
 from plexe.langgraph import PlexeOrchestrator, AgentConfig
 from plexe.langgraph.utils import WebSocketEmitter, MultiEmitter, ConsoleEmitter
+from plexe.langgraph.utils.logging_utils import setup_session_logging, session_id_var
 from plexe.api import datasets_router
 
 logger = logging.getLogger(__name__)
+
+# Initialize session-based logging
+setup_session_logging()
 
 app = FastAPI(title="Plexe Assistant", version="2.0.0")
 
@@ -157,12 +161,17 @@ async def websocket_endpoint(websocket: WebSocket):
         """Run the orchestrator in a separate thread."""
         nonlocal agent_task
         
+        # Set session ID in the async context for logging
+        session_id_var.set(session_id)
+        
         try:
             await send_message("thinking", "Processing your request...", "Orchestrator")
             
             def run_sync():
                 thread_loop = asyncio.new_event_loop()
                 asyncio.set_event_loop(thread_loop)
+                # Set session ID for logging in this thread
+                session_id_var.set(session_id)
                 try:
                     session = session_manager.get_session(session_id)
                     if not session:

@@ -7,7 +7,7 @@ def get_csv_files_info(csv_dir: str) -> Dict[str, Any]:
     Get information about CSV files in a directory.
     
     Args:
-        csv_dir: Directory containing CSV files
+        csv_dir: Directory containing CSV files (relative or absolute path)
     
     Returns:
         Dictionary with file information
@@ -15,23 +15,48 @@ def get_csv_files_info(csv_dir: str) -> Dict[str, Any]:
     import os
     import pandas as pd
     
-    files = []
-    for f in os.listdir(csv_dir):
-        if f.endswith('.csv'):
-            file_path = os.path.join(csv_dir, f)
-            try:
-                df = pd.read_csv(file_path, nrows=1)
-                row_count = sum(1 for _ in open(file_path)) - 1
-                files.append({
-                    "name": f.replace('.csv', ''),
-                    "path": file_path,
-                    "columns": list(df.columns),
-                    "row_count": row_count
-                })
-            except Exception as e:
-                files.append({"name": f, "error": str(e)})
+    # Convert to absolute path if needed
+    csv_dir = os.path.abspath(csv_dir)
     
-    return {"files": files, "count": len(files)}
+    # Check if directory exists
+    if not os.path.exists(csv_dir):
+        return {
+            "error": f"Directory does not exist: {csv_dir}",
+            "files": [],
+            "count": 0
+        }
+    
+    if not os.path.isdir(csv_dir):
+        return {
+            "error": f"Path is not a directory: {csv_dir}",
+            "files": [],
+            "count": 0
+        }
+    
+    files = []
+    try:
+        for f in os.listdir(csv_dir):
+            if f.endswith('.csv'):
+                file_path = os.path.join(csv_dir, f)
+                try:
+                    df = pd.read_csv(file_path, nrows=1)
+                    row_count = sum(1 for _ in open(file_path)) - 1
+                    files.append({
+                        "name": f.replace('.csv', ''),
+                        "path": file_path,
+                        "columns": list(df.columns),
+                        "row_count": row_count
+                    })
+                except Exception as e:
+                    files.append({"name": f, "error": str(e)})
+    except Exception as e:
+        return {
+            "error": f"Error reading directory: {str(e)}",
+            "files": [],
+            "count": 0
+        }
+    
+    return {"files": files, "count": len(files), "directory": csv_dir}
 
 
 @langchain_tool
@@ -40,7 +65,7 @@ def get_temporal_statistics(csv_dir: str) -> Dict[str, Any]:
     Analyze temporal columns in CSV files to determine val/test timestamps.
     
     Args:
-        csv_dir: Directory containing CSV files
+        csv_dir: Directory containing CSV files (relative or absolute path)
     
     Returns:
         Dictionary with temporal analysis and suggested timestamps
@@ -48,10 +73,30 @@ def get_temporal_statistics(csv_dir: str) -> Dict[str, Any]:
     import pandas as pd
     import os
     
+    # Convert to absolute path if needed
+    csv_dir = os.path.abspath(csv_dir)
+    
+    # Check if directory exists
+    if not os.path.exists(csv_dir):
+        return {
+            "error": f"Directory does not exist: {csv_dir}",
+            "temporal_stats": {},
+            "suggested_splits": {}
+        }
+    
     temporal_stats = {}
     all_timestamps = []
     
-    for f in os.listdir(csv_dir):
+    try:
+        dir_files = os.listdir(csv_dir)
+    except Exception as e:
+        return {
+            "error": f"Error reading directory: {str(e)}",
+            "temporal_stats": {},
+            "suggested_splits": {}
+        }
+    
+    for f in dir_files:
         if not f.endswith('.csv'):
             continue
         
@@ -116,11 +161,43 @@ def register_dataset_code(
         Registration status
     """
     import os
+    import ast
     
     os.makedirs(os.path.dirname(file_path), exist_ok=True)
     
+    # Sanitize the code - handle escaped characters from JSON serialization
+    sanitized_code = code
+    
+    # Check if the code has JSON-style escaping (e.g., \\n instead of real newlines)
+    # This typically happens when LLM output gets double-serialized
+    if '\\n' in code and '\n' not in code:
+        # Looks like it's been JSON-escaped - unescape it
+        import json
+        try:
+            # Wrap in quotes and parse as JSON string to unescape
+            sanitized_code = json.loads(f'"{code}"')
+        except json.JSONDecodeError:
+            # If that fails, try manual unescaping of common sequences
+            sanitized_code = code.replace('\\n', '\n')
+            sanitized_code = sanitized_code.replace('\\t', '\t')
+            sanitized_code = sanitized_code.replace('\\"', '"')
+            sanitized_code = sanitized_code.replace("\\'", "'")
+    
+    # Additional fix: handle backslash-escaped triple quotes that break f-strings
+    # Pattern: f\"\"\" should become f"""
+    if '\\"\\"\\"' in sanitized_code:
+        sanitized_code = sanitized_code.replace('\\"\\"\\"', '"""')
+    
+    # Validate that the code is syntactically valid Python
+    try:
+        ast.parse(sanitized_code)
+    except SyntaxError as e:
+        # If there's still a syntax error, log it but continue
+        import logging
+        logging.warning(f"Generated code has syntax error: {e}")
+    
     with open(file_path, 'w') as f:
-        f.write(code)
+        f.write(sanitized_code)
     
     return {
         "status": "registered",

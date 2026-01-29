@@ -16,6 +16,16 @@ const EventIcon = ({ eventType }) => {
 const getAgentTheme = (name = '') => {
     const lowerName = name.toLowerCase()
 
+    // ErrorHandler agent - red theme to indicate error state
+    if (lowerName.includes('errorhandler') || lowerName.includes('error_handler')) {
+        return {
+            accent: '#dc2626',
+            tint: 'rgba(220, 38, 38, 0.08)',
+            wash: 'rgba(220, 38, 38, 0.04)',
+            border: 'rgba(220, 38, 38, 0.3)'
+        }
+    }
+
     // Specific colors for known agents
     if (lowerName.includes('orchestrator')) {
         return {
@@ -32,6 +42,24 @@ const getAgentTheme = (name = '') => {
             tint: 'rgba(16, 185, 129, 0.08)',
             wash: 'rgba(16, 185, 129, 0.04)',
             border: 'rgba(16, 185, 129, 0.3)'
+        }
+    }
+
+    if (lowerName.includes('eda')) {
+        return {
+            accent: '#7c3aed',
+            tint: 'rgba(124, 58, 237, 0.08)',
+            wash: 'rgba(124, 58, 237, 0.04)',
+            border: 'rgba(124, 58, 237, 0.3)'
+        }
+    }
+
+    if (lowerName.includes('taskbuilder') || lowerName.includes('task_builder')) {
+        return {
+            accent: '#2c3e50',
+            tint: 'rgba(44, 62, 80, 0.08)',
+            wash: 'rgba(44, 62, 80, 0.04)',
+            border: 'rgba(44, 62, 80, 0.3)'
         }
     }
 
@@ -94,40 +122,160 @@ const groupMessagesByAgent = (messages) => {
 
 // Render a single event within an agent group
 const EventItem = ({ step }) => {
+    const [isExpanded, setIsExpanded] = useState(false)
     const eventType = step.event_type || 'thinking'
-    const hasError = step.message && step.message.toLowerCase().includes('error')
+
+    // Smarter error detection: only mark as error if it's actually an error response
+    // Check for status: "error" in JSON or explicit error event types
+    const hasError = (() => {
+        if (!step.message) return false
+
+        // Check if this is a tool result with error status
+        if (step.event_type === 'tool_result') {
+            try {
+                // Try to extract and parse JSON from the message
+                // Handle both raw JSON and "content='...'" format
+                let jsonStr = step.message
+                const contentMatch = step.message.match(/content='({.*})'/)
+                if (contentMatch) {
+                    jsonStr = contentMatch[1]
+                }
+
+                // Parse the JSON and check status field
+                const parsed = JSON.parse(jsonStr)
+                if (parsed.status === 'error') {
+                    return true
+                }
+                // If status is "success" or any other value, it's not an error
+                if (parsed.status) {
+                    return false
+                }
+            } catch (e) {
+                // Not valid JSON, fall through to other checks
+            }
+        }
+
+        // Check if message starts with explicit error indicators
+        if (step.message.match(/^(Error:|ERROR:|Failed:|FAILED:|Exception:)/i)) {
+            return true
+        }
+
+        // Don't mark as error just because it contains the word "error" in normal text
+        return false
+    })()
+
+    // Check if this is a tool result with content
+    const isToolResult = step.message && step.message.startsWith('Tool result:')
+    // Check if this is a reasoning/thinking message
+    const isReasoning = step.message && (
+        step.message.startsWith('💭') ||
+        step.message.startsWith('💡') ||
+        step.message.includes('Reasoning') ||
+        step.message.includes('Analysis')
+    )
+    const MAX_LINES = 5
 
     const renderMessage = () => {
         if (!step.message) return null
 
-        if (hasError) {
-            const parts = step.message.split(/(Error:?[^\n]*|error:?[^\n]*)/gi)
+        // For tool results, show first 5 lines with expand option
+        if (isToolResult) {
+            const content = step.message.replace(/^Tool result:\n?/, '')
+            const lines = content.split('\n')
+            const hasMoreLines = lines.length > MAX_LINES
+            const displayLines = isExpanded ? lines : lines.slice(0, MAX_LINES)
+
             return (
-                <>
-                    {parts.map((part, i) => {
-                        if (part.toLowerCase().includes('error')) {
-                            return <span key={i} className="error-text">{part}</span>
-                        }
-                        return <span key={i}>{part}</span>
-                    })}
-                </>
+                <div className="tool-result-content">
+                    <pre className="tool-result-text">{displayLines.join('\n')}</pre>
+                    {hasMoreLines && (
+                        <button
+                            className="expand-btn"
+                            onClick={() => setIsExpanded(!isExpanded)}
+                        >
+                            {isExpanded ? '▲ Collapse' : `▼ Expand (${lines.length - MAX_LINES} more lines)`}
+                        </button>
+                    )}
+                </div>
+            )
+        }
+
+        // For reasoning messages, format nicely with expand option
+        if (isReasoning) {
+            const lines = step.message.split('\n')
+            const hasMoreLines = lines.length > MAX_LINES + 2
+            const displayLines = isExpanded ? lines : lines.slice(0, MAX_LINES + 2)
+
+            return (
+                <div className="reasoning-content">
+                    <div className="reasoning-text">{displayLines.join('\n')}</div>
+                    {hasMoreLines && (
+                        <button
+                            className="expand-btn"
+                            onClick={() => setIsExpanded(!isExpanded)}
+                        >
+                            {isExpanded ? '▲ Collapse' : `▼ Show more (${lines.length - MAX_LINES - 2} more lines)`}
+                        </button>
+                    )}
+                </div>
+            )
+        }
+
+        if (hasError) {
+            // For actual errors, render with prominent styling and bold text
+            return (
+                <div className="error-message-box">
+                    <div className="error-icon">⚠️</div>
+                    <div className="error-content">
+                        <strong style={{ fontWeight: 700 }}>{step.message}</strong>
+                    </div>
+                </div>
             )
         }
 
         return step.message
     }
 
+    // Determine the icon based on message content
+    const getEventIcon = () => {
+        if (step.message) {
+            if (step.message.startsWith('💭')) return '💭'
+            if (step.message.startsWith('💡')) return '💡'
+        }
+        const icons = {
+            agent_start: '🚀',
+            thinking: '💭',
+            tool_call: '🔧',
+            tool_result: '✅',
+            agent_end: '🎯'
+        }
+        return icons[eventType] || '•'
+    }
+
+    // Determine the label based on message content
+    const getEventLabel = () => {
+        if (step.message) {
+            // Extract model info if present (e.g., "[openai/gpt-4o]")
+            const modelMatch = step.message.match(/\[([\w/-]+)\]/)
+            const modelInfo = modelMatch ? ` (${modelMatch[1]})` : ''
+
+            if (step.message.startsWith('💭 Reasoning')) return `Reasoning${modelInfo}`
+            if (step.message.startsWith('💡 Analysis')) return `Analysis${modelInfo}`
+        }
+
+        if (eventType === 'agent_start') return 'Starting'
+        if (eventType === 'thinking') return 'Reasoning'
+        if (eventType === 'tool_call') return `Tool: ${step.tool_name || 'Unknown'}`
+        if (eventType === 'tool_result') return 'Result'
+        if (eventType === 'agent_end') return 'Completed'
+        return eventType
+    }
+
     return (
-        <div className={`event-item ${eventType} ${hasError ? 'has-error' : ''}`}>
+        <div className={`event-item ${eventType} ${hasError ? 'has-error' : ''} ${isReasoning ? 'reasoning' : ''}`}>
             <div className="event-header">
-                <EventIcon eventType={eventType} />
-                <span className="event-label">
-                    {eventType === 'agent_start' && 'Starting'}
-                    {eventType === 'thinking' && 'Reasoning'}
-                    {eventType === 'tool_call' && `Tool: ${step.tool_name || 'Unknown'}`}
-                    {eventType === 'tool_result' && 'Result'}
-                    {eventType === 'agent_end' && 'Completed'}
-                </span>
+                <span className="event-icon">{getEventIcon()}</span>
+                <span className="event-label">{getEventLabel()}</span>
                 {step.timestamp && (
                     <span className="event-time">{step.timestamp}</span>
                 )}
@@ -142,7 +290,42 @@ const EventItem = ({ step }) => {
 // Render an agent group (multiple steps from same agent)
 const AgentGroup = ({ group }) => {
     const theme = getAgentTheme(group.agent)
-    const hasError = group.steps.some(s => s.message && s.message.toLowerCase().includes('error'))
+
+    // Check for actual errors: status:"error" in JSON content or explicit error messages
+    const hasError = group.steps.some(s => {
+        if (!s.message) return false
+
+        // Check for JSON with status: "error"
+        try {
+            // Handle content='...' format
+            const contentMatch = s.message.match(/content='({.*})'/)
+            const jsonStr = contentMatch ? contentMatch[1] : s.message
+            const parsed = JSON.parse(jsonStr)
+            if (parsed.status === 'error') {
+                return true
+            }
+        } catch (e) {
+            // Not valid JSON, continue to other checks
+        }
+
+        // Check for explicit error message prefixes
+        if (s.message.match(/^(Error:|ERROR:|Failed:|FAILED:|Exception:)/i)) {
+            return true
+        }
+
+        return false
+    })
+
+    // Extract model_id from agent_start step if available
+    const modelId = group.steps.find(s => s.event_type === 'agent_start')?.model_id || ''
+
+    // Calculate total token usage for this agent
+    const totalTokens = group.steps.reduce((sum, step) => {
+        if (step.token_usage && step.token_usage.total_tokens) {
+            return sum + step.token_usage.total_tokens
+        }
+        return sum
+    }, 0)
 
     const stepRange = group.startStep === group.endStep
         ? `Step ${group.startStep}`
@@ -162,9 +345,21 @@ const AgentGroup = ({ group }) => {
                         ? 'linear-gradient(135deg, rgba(254, 242, 242, 0.3) 0%, rgba(254, 226, 226, 0.2) 100%)'
                         : `linear-gradient(135deg, ${theme.wash} 0%, ${theme.tint} 100%)`
                 }}>
-                    <span className="agent-name" style={{ color: theme.accent }}>
-                        {group.agent}
-                    </span>
+                    <div className="agent-header-left">
+                        <span className="agent-name" style={{ color: theme.accent }}>
+                            {group.agent}
+                        </span>
+                        {modelId && (
+                            <span className="model-badge" title={modelId}>
+                                {modelId.split('/').pop()}
+                            </span>
+                        )}
+                        {totalTokens > 0 && (
+                            <span className="token-badge" title={`Total tokens used: ${totalTokens.toLocaleString()}`}>
+                                🪙 {totalTokens.toLocaleString()}
+                            </span>
+                        )}
+                    </div>
                     <span className="step-range" style={{
                         color: theme.accent,
                         opacity: 0.7
