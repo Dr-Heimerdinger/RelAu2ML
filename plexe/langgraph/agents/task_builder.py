@@ -10,16 +10,20 @@ import os
 from typing import Optional, List, Dict, Any
 
 from langchain_core.tools import BaseTool
+from langchain_core.messages import HumanMessage
 
 from plexe.langgraph.agents.base import BaseAgent
 from plexe.langgraph.config import AgentConfig
 from plexe.langgraph.state import PipelineState, PipelinePhase
 from plexe.langgraph.tools.common import save_artifact
 from plexe.langgraph.tools.dataset_builder import get_csv_files_info
-from plexe.langgraph.tools.task_builder import test_sql_query, register_task_code, validate_dataset_timestamps
+from plexe.langgraph.tools.task_builder import test_sql_query, register_task_code, validate_dataset_timestamps, fix_dataset_timestamps
 from plexe.langgraph.prompts.task_builder import TASK_BUILDER_SYSTEM_PROMPT
 
 logger = logging.getLogger(__name__)
+
+# Maximum retry attempts for incomplete tasks
+MAX_AGENT_RETRIES = 2
 
 class TaskBuilderAgent(BaseAgent):
     """Agent for building RelBench Task classes."""
@@ -32,6 +36,7 @@ class TaskBuilderAgent(BaseAgent):
         tools = [
             get_csv_files_info,
             validate_dataset_timestamps,
+            fix_dataset_timestamps,
             test_sql_query,
             register_task_code,
             save_artifact,
@@ -50,15 +55,90 @@ class TaskBuilderAgent(BaseAgent):
     def system_prompt(self) -> str:
         return TASK_BUILDER_SYSTEM_PROMPT
     
+    def invoke(self, state: PipelineState) -> Dict[str, Any]:
+        """
+        Invoke the agent with retry mechanism for incomplete tasks.
+        
+        The agent will be re-invoked if it fails to create the task.py file,
+        with a stronger prompt to complete the task.
+        """
+        working_dir = state.get("working_dir", "")
+        task_path = os.path.join(working_dir, "task.py") if working_dir else ""
+        
+        for attempt in range(MAX_AGENT_RETRIES + 1):
+            if attempt > 0:
+                logger.warning(f"TaskBuilderAgent retry attempt {attempt}/{MAX_AGENT_RETRIES}")
+                if self.emitter:
+                    self.emitter.emit_thought(
+                        self.name, 
+                        f"Retry attempt {attempt}: Previous attempt did not create task.py. Retrying with stronger instructions..."
+                    )
+            
+            # Call parent invoke
+            result = super().invoke(state)
+            
+            # Check if task.py was created
+            if task_path and os.path.exists(task_path):
+                logger.info(f"TaskBuilderAgent successfully created {task_path}")
+                return result
+            
+            # If this is not the last attempt, prepare for retry
+            if attempt < MAX_AGENT_RETRIES:
+                # Add a follow-up message to force completion
+                retry_message = self._build_retry_message(working_dir, state.get("csv_dir", ""))
+                
+                # Update messages in state for retry
+                messages = state.get("messages", [])
+                messages.append({
+                    "role": "user",
+                    "content": retry_message,
+                })
+                state = {**state, "messages": messages}
+        
+        # All retries exhausted, return the last result (which has error)
+        return result
+    
+    def _build_retry_message(self, working_dir: str, csv_dir: str) -> str:
+        """Build a retry message to force agent to complete the task."""
+        return f"""
+CRITICAL: YOU DID NOT COMPLETE YOUR TASK!
+
+The file {working_dir}/task.py does NOT exist.
+You MUST call register_task_code() to create this file.
+
+DO NOT analyze again. DO NOT explain. Just execute these steps NOW:
+
+1. Generate the complete GenTask class code with SQL query
+2. Call register_task_code(code, "GenTask", "{working_dir}/task.py", task_type)
+
+Your response MUST include a tool call to register_task_code.
+If you do not call this tool, you have FAILED completely.
+
+EXECUTE THE TOOL CALL NOW.
+"""
+    
     def _build_context(self, state: PipelineState) -> str:
         """Build context with task-specific information."""
         context_parts = []
         
-        if state.get("working_dir"):
-            context_parts.append(f"Working directory: {state['working_dir']}")
+        working_dir = state.get("working_dir", "")
+        csv_dir = state.get("csv_dir", "")
         
-        if state.get("csv_dir"):
-            context_parts.append(f"CSV directory: {state['csv_dir']}")
+        if working_dir:
+            context_parts.append(f"Working directory: {working_dir}")
+        
+        if csv_dir:
+            context_parts.append(f"CSV directory: {csv_dir}")
+        
+        # Pre-check: Verify dataset.py exists
+        dataset_path = os.path.join(working_dir, "dataset.py") if working_dir else ""
+        if dataset_path and not os.path.exists(dataset_path):
+            context_parts.append(f"""
+## CRITICAL ERROR - PREREQUISITE NOT MET
+Dataset file does not exist at: {dataset_path}
+The DatasetBuilderAgent must complete successfully before TaskBuilderAgent can run.
+You CANNOT proceed without dataset.py. Report this error.
+""")
         
         # User intent analysis
         if state.get("user_intent"):
@@ -148,6 +228,7 @@ class TaskBuilderAgent(BaseAgent):
         # Task generation instructions
         working_dir = state.get('working_dir', '')
         csv_dir = state.get('csv_dir', '')
+        dataset_file = f"{working_dir}/dataset.py"
         
         context_parts.append(f"""
 ## Your Task:
@@ -161,6 +242,11 @@ class TaskBuilderAgent(BaseAgent):
 8. For link prediction: set eval_k (typical: 10-12)
 9. Test your SQL: test_sql_query("{csv_dir}", query)
 10. Generate complete code and save: register_task_code(code, "GenTask", "{working_dir}/task.py", task_type)
+
+## File Paths (IMPORTANT - Use these exact paths):
+- Dataset file: {dataset_file}
+- CSV directory: {csv_dir}
+- Task output: {working_dir}/task.py
 
 CRITICAL REMINDERS:
 - Use TaskType enum: TaskType.BINARY_CLASSIFICATION, TaskType.REGRESSION, TaskType.LINK_PREDICTION
@@ -192,22 +278,27 @@ CRITICAL REMINDERS:
                 task_info["task_type"] = intent.get("task_type", "binary_classification")
             else:
                 task_info["task_type"] = "binary_classification"
+            
+            base_result["task_info"] = task_info
+            base_result["current_phase"] = PipelinePhase.GNN_TRAINING.value
         else:
             error_msg = f"CRITICAL ERROR: Task file not found at {task_path}. TaskBuilderAgent did not complete its task. The agent must call register_task_code() to generate task.py."
             logger.error(error_msg)
-            # Return error state to force re-invocation or escalation
-            base_result["error"] = error_msg
+            # Add to errors list so routing detects failure
+            existing_errors = base_result.get("errors", []) or []
+            existing_errors.append(error_msg)
+            base_result["errors"] = existing_errors
             base_result["status"] = "error"
+            # Set task_info with error flag for debugging
             task_info["class_name"] = "GenTask"
             task_info["file_path"] = task_path
-            task_info["error"] = "File not generated"
+            task_info["error"] = error_msg
             task_info["task_type"] = "binary_classification"
-        
-        base_result["task_info"] = task_info
+            base_result["task_info"] = task_info
+            # Do NOT advance phase - stay in task building
+            base_result["current_phase"] = PipelinePhase.TASK_BUILDING.value
         
         if generated_code:
             base_result["generated_code"] = generated_code
-        
-        base_result["current_phase"] = PipelinePhase.GNN_TRAINING.value
         
         return base_result

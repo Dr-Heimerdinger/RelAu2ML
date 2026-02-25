@@ -208,11 +208,12 @@ def validate_dataset_timestamps(
         
         # Check gap between val and test
         time_diff = (test_timestamp - val_timestamp).days
-        if time_diff < 30:
+        if time_diff < 1:
+            # Only flag as issue if timestamps are essentially the same day
+            # The actual required gap depends on the task's timedelta (e.g., 4 days, 7 days, 30 days)
             issues.append(
                 f"Gap between val_timestamp and test_timestamp is only {time_diff} days. "
-                f"This is insufficient for tasks with timedelta=30 days. "
-                f"Minimum recommended gap: 30+ days"
+                f"Timestamps appear to be the same or very close - this is likely an error."
             )
         
         # Check against actual data range if CSV files available
@@ -276,3 +277,87 @@ def validate_dataset_timestamps(
             "error": str(e)
         }
 
+
+@langchain_tool
+def fix_dataset_timestamps(
+    dataset_file_path: str,
+    val_timestamp: str,
+    test_timestamp: str
+) -> Dict[str, Any]:
+    """
+    Fix the val_timestamp and test_timestamp in an existing dataset.py file.
+    
+    Use this tool when validate_dataset_timestamps returns invalid status.
+    The tool will update the timestamps in the dataset.py file.
+    
+    Args:
+        dataset_file_path: Path to dataset.py file
+        val_timestamp: New val_timestamp in YYYY-MM-DD format
+        test_timestamp: New test_timestamp in YYYY-MM-DD format (must be after val_timestamp)
+    
+    Returns:
+        Status of the fix operation
+    """
+    import os
+    import re
+    import pandas as pd
+    
+    try:
+        # Validate timestamps
+        val_ts = pd.Timestamp(val_timestamp)
+        test_ts = pd.Timestamp(test_timestamp)
+        
+        if test_ts <= val_ts:
+            return {
+                "status": "error",
+                "error": "test_timestamp must be after val_timestamp"
+            }
+        
+        # Note: We don't enforce a minimum gap here because different tasks
+        # have different timedelta requirements (e.g., 7 days for weekly churn,
+        # 30 days for monthly predictions). The gap should be >= task's timedelta.
+        
+        # Read the dataset file
+        if not os.path.exists(dataset_file_path):
+            return {
+                "status": "error",
+                "error": f"Dataset file not found: {dataset_file_path}"
+            }
+        
+        with open(dataset_file_path, 'r') as f:
+            content = f.read()
+        
+        # Replace val_timestamp
+        val_pattern = r'val_timestamp\s*=\s*pd\.Timestamp\(["\'][^"\']*["\']\)'
+        val_replacement = f'val_timestamp = pd.Timestamp("{val_timestamp}")'
+        new_content = re.sub(val_pattern, val_replacement, content)
+        
+        # Replace test_timestamp
+        test_pattern = r'test_timestamp\s*=\s*pd\.Timestamp\(["\'][^"\']*["\']\)'
+        test_replacement = f'test_timestamp = pd.Timestamp("{test_timestamp}")'
+        new_content = re.sub(test_pattern, test_replacement, new_content)
+        
+        # Check if replacements were made
+        if new_content == content:
+            return {
+                "status": "error",
+                "error": "Could not find val_timestamp or test_timestamp patterns in dataset.py"
+            }
+        
+        # Write the updated content
+        with open(dataset_file_path, 'w') as f:
+            f.write(new_content)
+        
+        return {
+            "status": "success",
+            "message": f"Updated timestamps in {dataset_file_path}",
+            "val_timestamp": val_timestamp,
+            "test_timestamp": test_timestamp,
+            "time_diff_days": (test_ts - val_ts).days
+        }
+        
+    except Exception as e:
+        return {
+            "status": "error",
+            "error": str(e)
+        }

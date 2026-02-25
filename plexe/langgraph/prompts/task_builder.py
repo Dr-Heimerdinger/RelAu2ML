@@ -25,10 +25,15 @@ TASK TYPES & BASE CLASSES:
 
 MANDATORY WORKFLOW - EXECUTE ALL 7 STEPS:
 1. Analyze user intent and schema to determine task type
-2. **VALIDATE dataset timestamps** using validate_dataset_timestamps(dataset_file, csv_dir):
+2. **VALIDATE dataset timestamps** using validate_dataset_timestamps("{working_dir}/dataset.py", "{csv_dir}"):
    - Check that val_timestamp and test_timestamp are real dates (not 1970-01-01)
    - Verify timestamps are within the actual data range
-   - If validation fails, STOP and report the issue - dataset must be fixed first
+   - **IF VALIDATION FAILS**: Use fix_dataset_timestamps() to correct them:
+     * Calculate proper timestamps from the CSV data date ranges
+     * val_timestamp should be at ~70% of the data range
+     * test_timestamp should be at ~85% of the data range
+     * Ensure at least 30-day gap between val and test timestamps
+     * Example: If data spans 1950-2009, use val="1993-01-01" test="2002-01-01"
 3. Choose appropriate base class (EntityTask or RecommendationTask)
 4. Design SQL query with proper temporal filtering
 5. test_sql_query(csv_dir, query) - validate SQL syntax
@@ -184,6 +189,12 @@ SQL PATTERNS & BEST PRACTICES:
    -- Event occurrence (at least one)
    CAST(CASE WHEN COUNT(event.id) >= 1 THEN 1 ELSE 0 END AS INTEGER)
    
+   -- DNF / Failure Detection (CORRECT PATTERN FROM RelBench)
+   MAX(CASE WHEN re.statusId != 1 THEN 1 ELSE 0 END) AS did_not_finish
+   -- Important: statusId = 1 means "Finished", other values mean DNF
+   -- Use MAX() for binary flags, NOT COUNT() >= 1
+   -- Do NOT check for position IS NULL - that doesn't mean DNF!
+   
    -- Threshold-based
    CASE WHEN MIN(position) <= 3 THEN 1 ELSE 0 END
    ```
@@ -222,15 +233,34 @@ SQL PATTERNS & BEST PRACTICES:
    **Pattern B: LEFT JOIN + WHERE IN (Recent Active Entities) - RECOMMENDED**
    Use when predicting only for RECENTLY ACTIVE entities:
    ```sql
+   -- Example: Predict if driver will DNF in next 30 days (THIS IS THE EXACT PATTERN FROM RelBench)
+   SELECT
+       t.timestamp as date,
+       re.driverId as driverId,
+       MAX(CASE WHEN re.statusId != 1 THEN 1 ELSE 0 END) AS did_not_finish
    FROM timestamp_df t
-   LEFT JOIN results re ON re.date > t.timestamp AND re.date <= t.timestamp + INTERVAL 'X'
-   WHERE re.entity_id IN (
-       SELECT DISTINCT entity_id 
-       FROM events 
-       WHERE date > t.timestamp - INTERVAL '1 year'  -- or '6 months', '3 months'
+   LEFT JOIN results re 
+       ON re.date <= t.timestamp + INTERVAL '30 days'
+       AND re.date > t.timestamp
+   WHERE re.driverId IN (
+       SELECT DISTINCT driverId 
+       FROM results 
+       WHERE date > t.timestamp - INTERVAL '1 year'
    )
-   GROUP BY t.timestamp, re.entity_id
+   GROUP BY t.timestamp, re.driverId
    ```
+   
+   CRITICAL NOTES FOR PATTERN B:
+   - LEFT JOIN on the EVENT/FACT table (results), not entity table (drivers)
+   - WHERE IN filters to recently active entities only
+   - **IMPORTANT**: The subquery filter uses ONLY `date > t.timestamp - INTERVAL '1 year'`
+     Do NOT add `date <= t.timestamp` - this restricts to past-only and misses valid entities!
+   - For DNF/failure detection: Use `MAX(CASE WHEN statusId != 1 THEN 1 ELSE 0 END)`
+     Do NOT use `COUNT(CASE WHEN ... position IS NULL ...)` - NULL position doesn't mean DNF!
+   - statusId = 1 means "Finished", any other status means DNF
+   - Use `MAX(...)` for binary flags, not `COUNT(...) >= 1`
+   - Alias output column as same name used in entity_col (e.g., `re.driverId as driverId`)
+   
    PREFERRED: This creates fewer, more relevant rows (only active entities).
    Better for model quality and training efficiency.
    

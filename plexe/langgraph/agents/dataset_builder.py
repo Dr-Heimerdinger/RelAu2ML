@@ -10,6 +10,7 @@ import os
 from typing import Optional, List, Dict, Any
 
 from langchain_core.tools import BaseTool
+from langchain_core.messages import HumanMessage
 
 from plexe.langgraph.agents.base import BaseAgent
 from plexe.langgraph.config import AgentConfig
@@ -23,6 +24,9 @@ from plexe.langgraph.tools.dataset_builder import (
 from plexe.langgraph.prompts.dataset_builder import DATASET_BUILDER_SYSTEM_PROMPT
 
 logger = logging.getLogger(__name__)
+
+# Maximum retry attempts for incomplete tasks
+MAX_AGENT_RETRIES = 2
 
 class DatasetBuilderAgent(BaseAgent):
     """Agent for building RelBench Dataset classes from CSV data."""
@@ -51,6 +55,68 @@ class DatasetBuilderAgent(BaseAgent):
     @property
     def system_prompt(self) -> str:
         return DATASET_BUILDER_SYSTEM_PROMPT
+    
+    def invoke(self, state: PipelineState) -> Dict[str, Any]:
+        """
+        Invoke the agent with retry mechanism for incomplete tasks.
+        
+        The agent will be re-invoked if it fails to create the dataset.py file,
+        with a stronger prompt to complete the task.
+        """
+        working_dir = state.get("working_dir", "")
+        dataset_path = os.path.join(working_dir, "dataset.py") if working_dir else ""
+        
+        for attempt in range(MAX_AGENT_RETRIES + 1):
+            if attempt > 0:
+                logger.warning(f"DatasetBuilderAgent retry attempt {attempt}/{MAX_AGENT_RETRIES}")
+                if self.emitter:
+                    self.emitter.emit_thought(
+                        self.name, 
+                        f"Retry attempt {attempt}: Previous attempt did not create dataset.py. Retrying with stronger instructions..."
+                    )
+            
+            # Call parent invoke
+            result = super().invoke(state)
+            
+            # Check if dataset.py was created
+            if dataset_path and os.path.exists(dataset_path):
+                logger.info(f"DatasetBuilderAgent successfully created {dataset_path}")
+                return result
+            
+            # If this is not the last attempt, prepare for retry
+            if attempt < MAX_AGENT_RETRIES:
+                # Add a follow-up message to force completion
+                retry_message = self._build_retry_message(working_dir, state.get("csv_dir", ""))
+                
+                # Update messages in state for retry
+                messages = state.get("messages", [])
+                messages.append({
+                    "role": "user",
+                    "content": retry_message,
+                })
+                state = {**state, "messages": messages}
+        
+        # All retries exhausted, return the last result (which has error)
+        return result
+    
+    def _build_retry_message(self, working_dir: str, csv_dir: str) -> str:
+        """Build a retry message to force agent to complete the task."""
+        return f"""
+CRITICAL: YOU DID NOT COMPLETE YOUR TASK!
+
+The file {working_dir}/dataset.py does NOT exist.
+You MUST call register_dataset_code() to create this file.
+
+DO NOT analyze again. DO NOT explain. Just execute these steps NOW:
+
+1. Generate the complete GenDataset class code
+2. Call register_dataset_code(code, "GenDataset", "{working_dir}/dataset.py")
+
+Your response MUST include a tool call to register_dataset_code.
+If you do not call this tool, you have FAILED completely.
+
+EXECUTE THE TOOL CALL NOW.
+"""
     
     def _build_context(self, state: PipelineState) -> str:
         """Build context with CSV, schema, and EDA information."""
@@ -182,17 +248,22 @@ You stopped before calling register_dataset_code() OR the file was not created.
             dataset_info["class_name"] = "GenDataset"
             dataset_info["file_path"] = dataset_path
             logger.info(f"Dataset file created at: {dataset_path}")
+            base_result["dataset_info"] = dataset_info
+            base_result["current_phase"] = PipelinePhase.TASK_BUILDING.value
         else:
             error_msg = f"CRITICAL ERROR: Dataset file not found at {dataset_path}. DatasetBuilderAgent did not complete its task. The agent must call register_dataset_code() to generate dataset.py."
             logger.error(error_msg)
-            # Return error state to force re-invocation or escalation
-            base_result["error"] = error_msg
+            # Add to errors list so _route_from_dataset detects failure
+            existing_errors = base_result.get("errors", []) or []
+            existing_errors.append(error_msg)
+            base_result["errors"] = existing_errors
             base_result["status"] = "error"
+            # Set dataset_info with error flag for debugging
             dataset_info["class_name"] = "GenDataset"
             dataset_info["file_path"] = dataset_path
-            dataset_info["error"] = "File not generated"
-        
-        base_result["dataset_info"] = dataset_info
-        base_result["current_phase"] = PipelinePhase.TASK_BUILDING.value
+            dataset_info["error"] = error_msg
+            base_result["dataset_info"] = dataset_info
+            # Do NOT advance phase - stay in dataset building
+            base_result["current_phase"] = PipelinePhase.DATASET_BUILDING.value
         
         return base_result

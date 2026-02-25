@@ -87,6 +87,11 @@ def get_temporal_statistics(csv_dir: str) -> Dict[str, Any]:
     temporal_stats = {}
     all_timestamps = []
     
+    # Minimum valid year for timestamps - filters out Unix epoch false positives
+    # when integer IDs get parsed as microseconds from 1970-01-01
+    MIN_VALID_YEAR = 1900
+    MAX_VALID_YEAR = 2100
+    
     try:
         dir_files = os.listdir(csv_dir)
     except Exception as e:
@@ -108,12 +113,35 @@ def get_temporal_statistics(csv_dir: str) -> Dict[str, Any]:
             table_temporal = {}
             
             for col in df.columns:
+                # Skip columns that are likely ID columns based on name
+                col_lower = col.lower()
+                if col_lower.endswith('id') or col_lower == 'id':
+                    continue
+                
                 try:
                     parsed = pd.to_datetime(df[col], errors='coerce', format='mixed')
                     valid_count = parsed.notna().sum()
                     if valid_count > len(df) * 0.5:
                         min_ts = parsed.min()
                         max_ts = parsed.max()
+                        
+                        # Filter out false positives: timestamps near Unix epoch
+                        # These are usually integer columns (IDs) being parsed as 
+                        # microseconds from 1970-01-01
+                        if pd.notna(min_ts) and pd.notna(max_ts):
+                            min_year = min_ts.year
+                            max_year = max_ts.year
+                            
+                            # Skip if timestamps are outside reasonable range
+                            if min_year < MIN_VALID_YEAR or max_year > MAX_VALID_YEAR:
+                                continue
+                            
+                            # Skip if the range is suspiciously small (< 1 day)
+                            # This catches integer columns parsed as microseconds
+                            time_range = (max_ts - min_ts).total_seconds()
+                            if time_range < 86400:  # Less than 1 day in seconds
+                                continue
+                        
                         table_temporal[col] = {
                             "min": str(min_ts),
                             "max": str(max_ts),

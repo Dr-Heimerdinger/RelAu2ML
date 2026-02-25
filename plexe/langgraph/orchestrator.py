@@ -289,22 +289,44 @@ class PlexeOrchestrator:
         """Route from dataset building node."""
         if state.get("errors"):
             return "error"
-        if state.get("dataset_info"):
-            return "success"
+        
+        # Check if dataset_info exists AND has no error
+        dataset_info = state.get("dataset_info")
+        if dataset_info:
+            # If dataset_info has error field, treat as failure
+            if dataset_info.get("error"):
+                logger.error(f"Dataset building failed: {dataset_info.get('error')}")
+                return "error"
+        
+        # Also verify the actual file exists
         working_dir = state.get("working_dir", "")
-        if os.path.exists(os.path.join(working_dir, "dataset.py")):
+        dataset_path = os.path.join(working_dir, "dataset.py")
+        if os.path.exists(dataset_path):
             return "success"
+        
+        logger.error(f"Dataset file not found at: {dataset_path}")
         return "error"
     
     def _route_from_task(self, state: PipelineState) -> Literal["success", "error"]:
         """Route from task building node."""
         if state.get("errors"):
             return "error"
-        if state.get("task_info"):
-            return "success"
+        
+        # Check if task_info exists AND has no error
+        task_info = state.get("task_info")
+        if task_info:
+            # If task_info has error field, treat as failure
+            if task_info.get("error"):
+                logger.error(f"Task building failed: {task_info.get('error')}")
+                return "error"
+        
+        # Also verify the actual file exists
         working_dir = state.get("working_dir", "")
-        if os.path.exists(os.path.join(working_dir, "task.py")):
+        task_path = os.path.join(working_dir, "task.py")
+        if os.path.exists(task_path):
             return "success"
+        
+        logger.error(f"Task file not found at: {task_path}")
         return "error"
     
     def _route_from_training(self, state: PipelineState) -> Literal["success", "error"]:

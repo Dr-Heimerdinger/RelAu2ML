@@ -26,6 +26,7 @@ from plexe.langgraph.tools.task_builder import (
     test_sql_query,
     register_task_code,
     validate_dataset_timestamps,
+    fix_dataset_timestamps,
 )
 
 from plexe.langgraph.tools.gnn_specialist import (
@@ -50,6 +51,7 @@ __all__ = [
     "test_sql_query",
     "register_task_code",
     "validate_dataset_timestamps",
+    "fix_dataset_timestamps",
     "generate_training_script",
     "execute_training_script",
 ]
