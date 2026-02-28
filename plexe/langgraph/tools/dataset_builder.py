@@ -165,31 +165,21 @@ def get_temporal_statistics(csv_dir: str) -> Dict[str, Any]:
         if n > 2:
             val_ts = unique_timestamps[int(n * 0.7)]
             test_ts = unique_timestamps[int(n * 0.85)]
-            
-            # Ensure minimum gap of at least 30 days between val and test
-            # This is important for tasks with timedelta requirements
+
+            # Enforce a minimum gap of 1 day between val and test so they are
+            # never identical. The task-specific timedelta requirement is enforced
+            # later by validate_dataset_timestamps / fix_dataset_timestamps.
             time_diff = test_ts - val_ts
-            min_required_diff = pd.Timedelta(days=30)
-            
-            if time_diff < min_required_diff:
-                # Adjust test timestamp to be at least 30 days after val
-                test_ts = val_ts + min_required_diff
-                # Make sure test_ts doesn't exceed max timestamp
+            if time_diff < pd.Timedelta(days=1):
+                test_ts = val_ts + pd.Timedelta(days=1)
                 if test_ts > unique_timestamps[-1]:
-                    # If we can't fit 30 days, adjust both timestamps
                     test_ts = unique_timestamps[-1]
-                    val_ts = test_ts - min_required_diff
-                    # Ensure val is not before min timestamp
-                    if val_ts < unique_timestamps[0]:
-                        val_ts = unique_timestamps[0]
-                        test_ts = val_ts + min_required_diff
-            
+                    val_ts = test_ts - pd.Timedelta(days=1)
+
             suggested_splits = {
                 "val_timestamp": str(val_ts),
                 "test_timestamp": str(test_ts),
                 "time_diff_days": str((test_ts - val_ts).days),
-                "warning": None if time_diff >= min_required_diff else 
-                    f"Adjusted timestamps to ensure minimum 30-day gap for timedelta requirements"
             }
         else:
             suggested_splits = {

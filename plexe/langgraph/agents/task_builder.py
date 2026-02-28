@@ -17,7 +17,7 @@ from plexe.langgraph.config import AgentConfig
 from plexe.langgraph.state import PipelineState, PipelinePhase
 from plexe.langgraph.tools.common import save_artifact
 from plexe.langgraph.tools.dataset_builder import get_csv_files_info
-from plexe.langgraph.tools.task_builder import test_sql_query, register_task_code, validate_dataset_timestamps, fix_dataset_timestamps
+from plexe.langgraph.tools.task_builder import test_sql_query, register_task_code, validate_dataset_timestamps, fix_dataset_timestamps, determine_lookback_window
 from plexe.langgraph.prompts.task_builder import TASK_BUILDER_SYSTEM_PROMPT
 
 logger = logging.getLogger(__name__)
@@ -35,6 +35,7 @@ class TaskBuilderAgent(BaseAgent):
     ):
         tools = [
             get_csv_files_info,
+            determine_lookback_window,
             validate_dataset_timestamps,
             fix_dataset_timestamps,
             test_sql_query,
@@ -235,10 +236,11 @@ You CANNOT proceed without dataset.py. Report this error.
 1. Determine if this is an EntityTask or RecommendationTask based on user intent
 2. Identify the entity table and entity column (or src/dst for recommendations)
 3. Determine appropriate time_col (from temporal analysis)
-4. Design SQL query with proper temporal filtering to compute target labels
-5. Choose appropriate metrics based on task type
-6. Estimate reasonable timedelta (prediction window) based on temporal data range
-7. Set num_eval_timestamps (default 20, adjust based on data frequency)
+4. Estimate reasonable timedelta (prediction window) based on temporal data range
+5. **MANDATORY**: Call determine_lookback_window() to get the correct lookback window and SQL pattern
+   - You MUST follow the tool's recommendation for lookback_window and pattern
+6. Design SQL query using the recommended pattern and lookback window from step 5
+7. Choose appropriate metrics based on task type
 8. For link prediction: set eval_k (typical: 10-12)
 9. Test your SQL: test_sql_query("{csv_dir}", query)
 10. Generate complete code and save: register_task_code(code, "GenTask", "{working_dir}/task.py", task_type)

@@ -90,23 +90,45 @@ class ConversationalAgent(BaseAgent):
         return base_result
     
     def _extract_intent_from_state(self, state: PipelineState) -> Dict[str, Any]:
-        """Extract intent from state."""
+        """Extract intent from state messages using keyword heuristics."""
         intent = {
             "prediction_target": None,
             "entity_type": None,
-            "task_type": "binary_classification",
+            "task_type": "binary_classification",  # conservative default
             "data_source": "database" if state.get("db_connection_string") else "csv",
             "confirmed": True,
         }
-        
+
+        regression_keywords = [
+            "sum", "total", "sales", "revenue", "amount", "count",
+            "how much", "how many", "average", "mae", "rmse", "r2",
+            "mean absolute", "root mean", "ltv", "lifetime value",
+            "clicks", "votes", "popularity", "number of",
+        ]
+        link_prediction_keywords = [
+            "recommend", "which items", "list of", "purchase list",
+            "map@", "precision@", "recall@", "link prediction",
+        ]
+        classification_keywords = [
+            "churn", "leave", "cancel", "dnf", "qualify", "will happen",
+            "yes or no", "probability of", "predict if", "predict whether",
+        ]
+
         for msg in state.get("messages", []):
-            content = msg.get("content", "").lower()
-            if "predict" in content:
-                intent["prediction_target"] = msg.get("content", "")[:200]
-                if "churn" in content or "leave" in content or "cancel" in content:
-                    intent["task_type"] = "binary_classification"
-                elif "count" in content or "amount" in content or "revenue" in content:
-                    intent["task_type"] = "regression"
-                break
-        
+            content = msg.get("content", "")
+            content_lower = content.lower()
+            if "predict" not in content_lower and "forecast" not in content_lower:
+                continue
+
+            intent["prediction_target"] = content[:200]
+
+            if any(kw in content_lower for kw in link_prediction_keywords):
+                intent["task_type"] = "link_prediction"
+            elif any(kw in content_lower for kw in regression_keywords):
+                intent["task_type"] = "regression"
+            elif any(kw in content_lower for kw in classification_keywords):
+                intent["task_type"] = "binary_classification"
+            # else: keep default "binary_classification"
+            break
+
         return intent

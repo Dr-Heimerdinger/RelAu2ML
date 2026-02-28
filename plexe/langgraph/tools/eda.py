@@ -419,17 +419,23 @@ def generate_eda_summary(
     fact_tables = [t for t, info in dim_fact.items() if info.get("classification") == "fact"]
     dim_tables = [t for t, info in dim_fact.items() if info.get("classification") in ["dimension", "dimension_with_hierarchy"]]
     
-    if fact_tables:
+    if fact_tables or dim_tables:
         summary["key_findings"].append({
             "category": "schema",
-            "finding": f"Identified {len(fact_tables)} fact tables and {len(dim_tables)} dimension tables",
-            "details": {"fact_tables": fact_tables, "dimension_tables": dim_tables}
+            "finding": f"Identified {len(fact_tables)} event/fact tables and {len(dim_tables)} entity/dimension tables",
+            "details": {"event_tables": fact_tables, "entity_tables": dim_tables}
         })
-        
+
         summary["recommendations"].append({
             "category": "modeling",
-            "recommendation": "Consider fact tables as entity tables for prediction tasks",
-            "details": f"Suggested entity tables: {', '.join(fact_tables)}"
+            "recommendation": (
+                "Use entity/dimension tables (not event tables) as the prediction subject. "
+                "Event tables provide historical context in SQL queries."
+            ),
+            "details": {
+                "entity_tables_for_prediction": dim_tables,
+                "event_tables_for_sql_context": fact_tables,
+            }
         })
     
     return {
