@@ -16,13 +16,22 @@ Purpose: List all CSV files, their columns, and row counts
 ## 2: Call get_temporal_statistics(csv_dir)
 Purpose: Analyze timestamp columns and get val_timestamp/test_timestamp for train/val/test splits
 
-CRITICAL: Verify that val_timestamp and test_timestamp satisfy ALL of:
-- Real calendar dates (not Unix epoch times like 1970-01-01)
-- Within the actual data range
+CRITICAL — val_timestamp and test_timestamp must NEVER be None:
+- They MUST always be pd.Timestamp("YYYY-MM-DD") with real calendar dates.
+- Setting val_timestamp = None or test_timestamp = None will CRASH the entire pipeline.
+- If get_temporal_statistics() returns empty results, compute timestamps yourself:
+  scan temporal columns from get_csv_files_info(), find the overall min/max date range,
+  then set val_timestamp ≈ 70th percentile and test_timestamp ≈ 85th percentile of that range.
+
+Additional requirements:
+- Timestamps must be real calendar dates (not Unix epoch times like 1970-01-01)
+- Timestamps must be within the actual data range
 - The gap (test_timestamp - val_timestamp) must be >= the expected prediction window.
   For most tasks the prediction window is 7-30 days, so ensure the gap is at least 30 days
   unless the user explicitly specifies a shorter window. A gap that is too small will cause
   a runtime ValueError ("timedelta cannot be larger than the difference between val and test timestamps").
+- The training range (data_start to val_timestamp) must cover a substantial portion of the data
+  (at least 50%). Do NOT place val_timestamp too early — the model needs sufficient training data.
 
 ## 3: ANALYSIS - Write your understanding before generating code:
 - Identify which tables have temporal columns (time_col) vs static tables (time_col=None)
@@ -134,6 +143,10 @@ KEY RULES & BEST PRACTICES:
    - Format: {"fk_column_name": "referenced_table_name"}
    - Multiple FKs allowed: {"race_id": "races", "driver_id": "drivers", "constructor_id": "constructors"}
    - Self-references allowed: {"parent_id": "posts"} in same table
+   - ONLY include actual foreign key columns (columns whose values reference another table's primary key)
+   - NEVER include regular data columns (like "level", "status", "type") in fkey_col_to_pkey_table
+   - NEVER use None as a value: {"column": None} is INVALID and will crash the pipeline
+   - If unsure whether a column is a foreign key, leave it out — only include columns you are certain reference another table
 
 5. **Column Dropping** (if applicable):
    - Remove URL columns (usually unique, not predictive)
@@ -142,8 +155,9 @@ KEY RULES & BEST PRACTICES:
    - Document WHY columns are dropped
 
 6. **Table Naming**:
-   - Use snake_case for table names in tables dict
-   - Match CSV filenames
+   - Table names in tables dict MUST exactly match CSV filenames (without .csv extension), preserving original case
+   - Example: if the CSV is "UserInfo.csv", the table key must be "UserInfo", NOT "userinfo"
+   - Example: if the CSV is "searchinfo.csv", the table key must be "searchinfo"
 
 FINAL OUTPUT: Complete Python code saved to dataset.py via register_dataset_code() tool call.
 

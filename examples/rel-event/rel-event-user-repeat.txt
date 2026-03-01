@@ -1,0 +1,6 @@
+I am working with the data is loaded into the `event` database (connection string: `postgresql+psycopg2://mlflow:mlflow@postgres:5432/event`).
+I want to define a predictive task on this relational database.
+- Database Description: The Event Recommendation database is obtained from user data on a mobile app called Hangtime. This app allows users to keep track of their friends' social plans. The database contains data on user actions, event metadata, and demographic information, as well as users' social relations, which captures how social relations can affect user behavior. Data is fully anonymized, with no personally identifiable information (such as names or aliases) available.
+- Task definition: Predict whether a user will attend an event(by responding yes or maybe) in the next 7 days if they have already attended an event in the last 14 days.
+- Evaluation metric: Area Under the Receiver Operating Characteristic curve (AUROC).
+I don't have any requirements, if you need them you can set by default automatically.

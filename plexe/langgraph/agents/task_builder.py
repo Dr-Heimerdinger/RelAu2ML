@@ -17,7 +17,7 @@ from plexe.langgraph.config import AgentConfig
 from plexe.langgraph.state import PipelineState, PipelinePhase
 from plexe.langgraph.tools.common import save_artifact
 from plexe.langgraph.tools.dataset_builder import get_csv_files_info
-from plexe.langgraph.tools.task_builder import test_sql_query, register_task_code, validate_dataset_timestamps, fix_dataset_timestamps, determine_lookback_window
+from plexe.langgraph.tools.task_builder import test_sql_query, register_task_code, validate_dataset_timestamps, fix_dataset_timestamps, analyze_task_structure, determine_lookback_window
 from plexe.langgraph.prompts.task_builder import TASK_BUILDER_SYSTEM_PROMPT
 
 logger = logging.getLogger(__name__)
@@ -35,6 +35,7 @@ class TaskBuilderAgent(BaseAgent):
     ):
         tools = [
             get_csv_files_info,
+            analyze_task_structure,
             determine_lookback_window,
             validate_dataset_timestamps,
             fix_dataset_timestamps,
@@ -174,7 +175,7 @@ You CANNOT proceed without dataset.py. Report this error.
                 columns = table_info.get("columns", [])
                 pk = table_info.get("primary_key", [])
                 context_parts.append(f"  - {table_name}:")
-                context_parts.append(f"    * Columns: {', '.join([c['name'] for c in columns[:10]])}")
+                context_parts.append(f"    * Columns: {', '.join([c['name'] for c in columns[:20]])}")
                 if pk:
                     context_parts.append(f"    * Primary Key: {pk}")
             
@@ -228,9 +229,13 @@ You CANNOT proceed without dataset.py. Report this error.
         
         # Compute the val/test gap from dataset_info so the agent knows
         # the maximum timedelta the dataset can support.
+        # Fall back to EDA suggested_splits when dataset_info has no timestamps.
         ds = state.get("dataset_info") or {}
-        val_ts_str = ds.get("val_timestamp", "")
-        test_ts_str = ds.get("test_timestamp", "")
+        eda = state.get("eda_info") or {}
+        splits = eda.get("suggested_splits") or {}
+
+        val_ts_str = ds.get("val_timestamp") or splits.get("train_end", "")
+        test_ts_str = ds.get("test_timestamp") or splits.get("val_end", "")
         timestamp_gap_days = None
         if val_ts_str and test_ts_str:
             try:
@@ -253,10 +258,21 @@ You CANNOT proceed without dataset.py. Report this error.
    NOTE: Current val/test gap is {timestamp_gap_days} days. Your timedelta MUST be <= {timestamp_gap_days}.''' if timestamp_gap_days else ''}
    If invalid, fix with fix_dataset_timestamps() before proceeding.
 3. Choose base class (EntityTask or RecommendationTask)
-4. Call determine_lookback_window() to get the correct lookback window and SQL pattern.
-   You MUST follow the tool's recommendation for lookback_window and pattern.
+4. Call analyze_task_structure() to get evidence for pattern selection:
+   analyze_task_structure("{csv_dir}", event_table, entity_col, time_col, timedelta_days, task_description, entity_table)
+   Review ALL sections of the output, especially:
+   - entity_source.entity_table_has_creation_date (Pattern D signal)
+   - temporal.max_gap_exceeds_timedelta (if true, prefer Pattern B over A even with an entity table)
+   - temporal.suggested_lookback_interval (use this for Pattern B lookback value)
+   - pattern_candidates (ranked suggestions -- use as guidance, not as absolute rule)
+   - building_blocks (whether CTE, nested JOIN, quality filter, or HAVING is needed)
+   - schema_hints.potential_join_tables (tables that share columns with the event table)
 5. Identify entity table, entity column, time column, and target column
-6. Design SQL query using the recommended pattern and lookback window from step 4
+6. Design SQL query using your selected pattern. Consider composable building blocks (Part 4B) if needed:
+   - CTE: for multi-table preprocessing or combining event sources
+   - Nested LEFT JOIN: for entity-event pre-join patterns
+   - Chained JOIN: for link prediction through junction tables
+   - Quality filters: for rating/length/status conditions
 7. Choose appropriate metrics based on task type
 8. For link prediction: set eval_k (typical: 10-12)
 9. Test your SQL: test_sql_query("{csv_dir}", query)
@@ -269,12 +285,17 @@ You CANNOT proceed without dataset.py. Report this error.
 
 ## Reminders:
 - Use TaskType enum: TaskType.BINARY_CLASSIFICATION, TaskType.REGRESSION, TaskType.LINK_PREDICTION
+- "predict if", "whether", "will make any", "will X do more than N" = BINARY_CLASSIFICATION, NOT REGRESSION (use IF(COUNT>=1,1,0) not raw COUNT)
 - Import correct base class: EntityTask or RecommendationTask
 - Import only metrics you use from plexe.relbench.metrics
-- Column names in SQL must exactly match CSV column names (use get_csv_files_info to verify)
+- Column names in SQL must EXACTLY match CSV column names INCLUDING CASE (use get_csv_files_info to verify)
+- entity_table must EXACTLY match the CSV filename (without .csv) INCLUDING CASE
 - time_col value must match the timestamp column name in the SQL output
+- ALWAYS use INTERVAL '{{self.timedelta}}' in SQL — NEVER compute days manually
+- Do NOT add CAST(col AS TIMESTAMP) for columns already parsed as datetime in dataset.py
 - Use duckdb.register() for every DataFrame, then duckdb.sql()
 - Return Table with proper fkey_col_to_pkey_table mapping
+- If data range is narrow (< 3 months) or data_range/timedelta < 5, set num_eval_timestamps = 40
 """)
         
         return "\n".join(context_parts)

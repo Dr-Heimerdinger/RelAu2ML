@@ -1,0 +1,6 @@
+I am working with the data is loaded into the `stack` database (connection string: `postgresql+psycopg2://mlflow:mlflow@postgres:5432/stack`).
+I want to define a predictive task on this relational database.
+- Database Description: Stack Exchange is a network of question-and-answer websites on topics in diverse fields, each site covering a specific topic, where questions, answers, and users are subject to a reputation award process. The reputation system allows the sites to be self-moderating
+- Task definition: For each user predict if a user will receive a new badge in the next 3 months.
+- Evaluation metric: Area Under the Receiver Operating Characteristic curve (AUROC).
+I don't have any requirements, if you need them you can set by default automatically.

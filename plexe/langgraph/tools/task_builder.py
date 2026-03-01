@@ -1,5 +1,530 @@
-from typing import Dict, Any
+from typing import Dict, Any, List
 from langchain_core.tools import tool as langchain_tool
+
+
+def _round_to_clean_interval(raw_days: int) -> str:
+    """Round raw lookback days to a human-readable interval string."""
+    if raw_days >= 548:
+        return "2 years"
+    elif raw_days >= 274:
+        return "1 year"
+    elif raw_days >= 137:
+        return "6 months"
+    elif raw_days >= 60:
+        return "3 months"
+    else:
+        return f"{raw_days} days"
+
+
+def _find_entity_pk(entity_df, entity_col: str) -> str:
+    """Find the primary key column in entity table matching entity_col."""
+    # Direct match
+    if entity_col in entity_df.columns:
+        return entity_col
+    # Try 'id' or 'Id' (common in stack, trial datasets)
+    for candidate in ['id', 'Id', 'ID']:
+        if candidate in entity_df.columns:
+            return candidate
+    # Try case-insensitive match
+    for col in entity_df.columns:
+        if col.lower() == entity_col.lower():
+            return col
+    return None
+
+
+@langchain_tool
+def analyze_task_structure(
+    csv_dir: str,
+    event_table: str,
+    entity_col: str,
+    time_col: str,
+    timedelta_days: int,
+    task_description: str,
+    entity_table: str = "",
+) -> Dict[str, Any]:
+    """
+    Analyze data structure to recommend SQL patterns for the training table.
+    MUST be called before designing the SQL query (Step 4 of the workflow).
+
+    Returns a multi-faceted analysis with:
+    - Entity source analysis (dimension table vs event-derived)
+    - Temporal gap analysis (key for Pattern A vs B decision)
+    - Semantic signals (churn, link prediction, regression)
+    - Schema hints (intermediate tables, potential JOINs)
+    - Ranked pattern candidates with confidence and reasoning
+    - Building block suggestions (CTE, nested JOIN, etc.)
+
+    The LLM should use ALL sections to select the best pattern. The tool provides
+    evidence and ranked candidates, but the LLM makes the final decision.
+
+    Args:
+        csv_dir: Directory containing CSV files
+        event_table: Name of the event/fact table CSV (without .csv extension)
+        entity_col: Column name identifying the entity (e.g., 'customer_id')
+        time_col: Column name for the temporal column in the event table (e.g., 't_dat')
+        timedelta_days: The prediction window in days (e.g., 7 for weekly churn)
+        task_description: Brief description of the task (e.g., 'predict customer churn')
+        entity_table: Name of the entity/dimension table CSV (without .csv extension).
+            If provided, checks for creation/start date columns and entity coverage.
+
+    Returns:
+        Structured analysis with entity_source, temporal, semantic, schema_hints,
+        pattern_candidates (ranked), and building_blocks suggestions
+    """
+    import os
+    import numpy as np
+    import pandas as pd
+
+    try:
+        csv_dir = os.path.abspath(csv_dir)
+        file_path = os.path.join(csv_dir, f"{event_table}.csv")
+
+        if not os.path.exists(file_path):
+            return {"status": "error", "error": f"Event table CSV not found: {file_path}"}
+
+        df = pd.read_csv(file_path)
+
+        if entity_col not in df.columns:
+            return {"status": "error", "error": f"Entity column '{entity_col}' not found in {event_table}.csv"}
+        if time_col not in df.columns:
+            return {"status": "error", "error": f"Time column '{time_col}' not found in {event_table}.csv"}
+
+        df[time_col] = pd.to_datetime(df[time_col], errors='coerce')
+        df = df.dropna(subset=[time_col])
+
+        task_lower = task_description.lower()
+        timedelta = pd.Timedelta(days=timedelta_days)
+        date_range = df[time_col].max() - df[time_col].min()
+        date_range_days = max(int(date_range.days), 1)
+
+        # ================================================================
+        # Section 1: Entity Source Analysis
+        # ================================================================
+        entity_source = {
+            "has_dedicated_entity_table": False,
+            "entity_table_row_count": 0,
+            "entity_table_has_creation_date": False,
+            "creation_date_column": None,
+            "entities_in_event_table": int(df[entity_col].nunique()),
+            "entity_coverage_ratio": 1.0,  # default: all entities come from events
+        }
+
+        entity_creation_col = None
+        entity_table_cols = []
+
+        if entity_table:
+            entity_file = os.path.join(csv_dir, f"{entity_table}.csv")
+            if os.path.exists(entity_file):
+                try:
+                    entity_df = pd.read_csv(entity_file)
+                    entity_table_cols = list(entity_df.columns)
+                    entity_pk = _find_entity_pk(entity_df, entity_col)
+
+                    entity_source["has_dedicated_entity_table"] = True
+                    entity_source["entity_table_row_count"] = len(entity_df)
+
+                    # Entity coverage: what fraction of entity table entities appear in events
+                    if entity_pk:
+                        entity_ids_in_table = entity_df[entity_pk].nunique()
+                        entity_ids_in_events = df[entity_col].nunique()
+                        entity_source["entity_coverage_ratio"] = round(
+                            entity_ids_in_events / max(entity_ids_in_table, 1), 3
+                        )
+
+                    # Check for creation/start date columns
+                    creation_signals = [
+                        'creation', 'created', 'start_date', 'publish',
+                        'registered', 'signup', 'join_date', 'enrollment',
+                        # finance
+                        'opened', 'open_date', 'inception', 'originated', 'activated', 'account_open',
+                        # healthcare
+                        'admission', 'admitted', 'intake', 'first_seen', 'onset',
+                        # media/retail
+                        'release', 'released', 'launched', 'listed', 'listed_date', 'added_date',
+                        # general
+                        'available', 'established', 'founded', 'first_active',
+                    ]
+                    sample_df = entity_df.head(100)
+                    for col in sample_df.columns:
+                        col_lower = col.lower()
+                        if col_lower.endswith('id') or col_lower == 'id':
+                            continue
+                        if any(sig in col_lower for sig in creation_signals):
+                            try:
+                                parsed = pd.to_datetime(sample_df[col], errors='coerce')
+                                if parsed.notna().sum() > len(sample_df) * 0.3:
+                                    entity_creation_col = col
+                                    entity_source["entity_table_has_creation_date"] = True
+                                    entity_source["creation_date_column"] = col
+                                    break
+                            except Exception:
+                                pass
+                except Exception:
+                    pass
+
+        # ================================================================
+        # Section 2: Temporal Analysis (gap-based, the key fix for A vs B)
+        # ================================================================
+        entity_event_counts = df.groupby(entity_col).size()
+        median_events_per_entity = float(entity_event_counts.median())
+        num_windows = max(date_range / timedelta, 1)
+        total_events = len(df)
+        unique_entities = int(df[entity_col].nunique())
+        events_per_day = total_events / date_range_days
+
+        # Compute inter-event gap statistics (the critical fix)
+        inter_event_gap_median = 0.0
+        inter_event_gap_p90 = 0.0
+        inter_event_gap_max = 0.0
+        try:
+            df_sorted = df[[entity_col, time_col]].sort_values([entity_col, time_col])
+            df_sorted = df_sorted.assign(
+                prev_time=df_sorted.groupby(entity_col)[time_col].shift(1)
+            )
+            gap_series = (df_sorted[time_col] - df_sorted["prev_time"]).dt.days.dropna()
+            if len(gap_series) > 0:
+                inter_event_gap_median = float(gap_series.median())
+                inter_event_gap_p90 = float(gap_series.quantile(0.9))
+                inter_event_gap_max = float(gap_series.max())
+        except Exception:
+            inter_event_gap_median = float(date_range_days)
+            inter_event_gap_p90 = float(date_range_days)
+            inter_event_gap_max = float(date_range_days)
+
+        # max_gap_exceeds_timedelta is true when either:
+        # - P90 gap > 2x timedelta (many entities have gaps much larger than the window), OR
+        # - Max gap > 3x timedelta (structural gaps exist, e.g., off-seasons, that
+        #   self.timedelta can't span — even if typical gaps are small)
+        # The 2x multiplier on p90 avoids false positives when gaps are just slightly
+        # above timedelta (common in high-frequency data like daily retail transactions).
+        max_gap_exceeds_timedelta = (
+            inter_event_gap_p90 > timedelta_days * 2
+            or inter_event_gap_max > timedelta_days * 3
+        )
+
+        # Always compute a data-driven lookback (useful regardless of pattern)
+        raw_lookback_days = max(
+            int(max(inter_event_gap_p90, inter_event_gap_max / 2) * 3),
+            timedelta_days * 4,
+            30,
+        )
+        raw_lookback_days = min(raw_lookback_days, date_range_days)
+        suggested_lookback_interval = _round_to_clean_interval(raw_lookback_days)
+
+        temporal = {
+            "data_range_days": date_range_days,
+            "total_events": int(total_events),
+            "unique_entities": unique_entities,
+            "events_per_entity_median": round(median_events_per_entity, 2),
+            "events_per_entity_p25": round(float(entity_event_counts.quantile(0.25)), 2),
+            "events_per_entity_p75": round(float(entity_event_counts.quantile(0.75)), 2),
+            "events_per_window_median": round(float(median_events_per_entity / num_windows), 4),
+            "inter_event_gap_median_days": round(inter_event_gap_median, 1),
+            "inter_event_gap_p90_days": round(inter_event_gap_p90, 1),
+            "inter_event_gap_max_days": round(inter_event_gap_max, 1),
+            "max_gap_exceeds_timedelta": max_gap_exceeds_timedelta,
+            "suggested_lookback_days": raw_lookback_days,
+            "suggested_lookback_interval": suggested_lookback_interval,
+            "timedelta_days": timedelta_days,
+        }
+
+        # ================================================================
+        # Section 3: Semantic Signals
+        # ================================================================
+        churn_keywords = [
+            'churn', 'no activity', 'no transaction', 'inactive',
+            'absence', 'will not', "won't", 'stop', 'leave',
+            'retain', 'retention', 'lapse', 'dormant',
+        ]
+        link_keywords = [
+            'list of', 'recommend', 'which items', 'purchase list',
+            'link prediction', 'map@', 'precision@', 'recall@',
+            # social/graph/healthcare
+            'who will', 'which users', 'which entities', 'will connect', 'will interact',
+            'co-occur', 'relation', 'graph link', 'drug interaction', 'co-authorship',
+        ]
+        catalog_entity_signals = [
+            'article', 'product', 'item', 'post', 'listing',
+            'study', 'trial', 'facility', 'site', 'ad',
+            # media/music
+            'track', 'song', 'album', 'artist', 'video', 'movie', 'episode', 'show', 'playlist',
+            # finance
+            'account', 'security', 'fund', 'instrument', 'loan', 'invoice', 'order',
+            # healthcare
+            'patient', 'medication', 'drug', 'procedure', 'diagnosis',
+            # general
+            'property', 'unit', 'ticket', 'job', 'project',
+        ]
+        aggregate_regression_signals = [
+            'total', 'sum of', 'sales', 'revenue', 'ltv',
+            'popularity', 'count of', 'clicks', 'votes', 'ctr',
+            'how much', 'how many', 'number of', 'mae', 'rmse',
+            # media/music
+            'streams', 'plays', 'listen', 'views', 'watch time', 'play count',
+            # finance
+            'balance', 'return', 'yield', 'spend', 'amount', 'exposure', 'volume',
+            # healthcare
+            'readmission', 'length of stay', 'lab value', 'mortality', 'dosage',
+            # general
+            'score', 'rating', 'duration', 'delay', 'distance', 'throughput',
+        ]
+        active_qualifier_keywords = [
+            'active', 'recently', 'recent ', 'engaged', 'retained',
+            'previously purchased', 'previously active',
+        ]
+
+        is_churn_task = any(kw in task_lower for kw in churn_keywords)
+        is_link_task = any(kw in task_lower for kw in link_keywords)
+        entity_is_catalog = any(kw in entity_col.lower() for kw in catalog_entity_signals)
+        is_aggregate_regression = any(kw in task_lower for kw in aggregate_regression_signals)
+        has_active_qualifier = any(kw in task_lower for kw in active_qualifier_keywords)
+        is_all_entities_task = (
+            entity_is_catalog and is_aggregate_regression
+            and not is_churn_task and not has_active_qualifier
+        )
+
+        semantic = {
+            "churn_signals_detected": is_churn_task,
+            "link_prediction_signals_detected": is_link_task,
+            "all_entity_regression_signals": is_all_entities_task,
+            "active_qualifier_detected": has_active_qualifier,
+        }
+
+        # ================================================================
+        # Section 4: Schema Hints
+        # ================================================================
+        event_table_cols = list(df.columns)
+        potential_join_tables = []
+        try:
+            event_col_set = set(df.columns)
+            for f in os.listdir(csv_dir):
+                if f.endswith('.csv'):
+                    other_name = f.replace('.csv', '')
+                    if other_name in [event_table, entity_table]:
+                        continue
+                    try:
+                        other_df = pd.read_csv(os.path.join(csv_dir, f), nrows=5)
+                        shared = set(other_df.columns) & event_col_set
+                        # Filter out generic columns that cause false join signals
+                        GENERIC_COLS = {
+                            'id', 'index', 'timestamp', 'date', 'time', 'type', 'status',
+                            'name', 'description', 'value', 'created_at', 'updated_at',
+                            'created', 'modified', 'updated',
+                        }
+                        shared = {c for c in shared if c.lower() not in GENERIC_COLS}
+                        if shared:
+                            potential_join_tables.append({
+                                "table": other_name,
+                                "shared_columns_with_event": list(shared),
+                                "columns": list(other_df.columns),
+                            })
+                    except Exception:
+                        pass
+        except Exception:
+            pass
+
+        schema_hints = {
+            "event_table_columns": event_table_cols,
+            "entity_table_columns": entity_table_cols,
+            "potential_join_tables": potential_join_tables,
+        }
+
+        # ================================================================
+        # Section 5: Ranked Pattern Candidates
+        # ================================================================
+        candidates: List[Dict[str, Any]] = []
+        has_entity_table = entity_source["has_dedicated_entity_table"]
+        has_creation_date = entity_source["entity_table_has_creation_date"]
+
+        # Link prediction: highest priority
+        if is_link_task:
+            candidates.append({
+                "pattern": "Link",
+                "confidence": 0.95,
+                "lookback": None,
+                "reason": "Link prediction keywords detected. Use LEFT JOIN event table + LIST(DISTINCT).",
+            })
+
+        # Churn/absence: second priority
+        if is_churn_task:
+            candidates.append({
+                "pattern": "A",
+                "confidence": 0.95,
+                "lookback": "self.timedelta",
+                "reason": (
+                    f"Churn/absence keywords detected. Lookback MUST equal self.timedelta "
+                    f"(={timedelta_days}d) for symmetric active/inactive window."
+                ),
+            })
+
+        # Pattern D: entity with creation date
+        if has_creation_date and not is_all_entities_task:
+            conf = 0.85 if not is_churn_task else 0.3
+            candidates.append({
+                "pattern": "D",
+                "confidence": conf,
+                "lookback": None,
+                "reason": (
+                    f"Entity table '{entity_table}' has creation date column "
+                    f"'{entity_creation_col}'. Use LEFT JOIN entity ON "
+                    f"{entity_creation_col} <= timestamp."
+                ),
+            })
+
+        # Pattern C: all-entity regression
+        if is_all_entities_task:
+            candidates.append({
+                "pattern": "C",
+                "confidence": 0.85,
+                "lookback": None,
+                "reason": (
+                    f"All-entity regression: entity_col='{entity_col}' is a catalog entity "
+                    f"and target is aggregate. Zero is valid (no filter). Use COALESCE(agg, 0)."
+                ),
+            })
+
+        # Pattern A vs B for non-churn, non-link, non-all-entity, non-creation-date tasks
+        if not is_link_task and not is_churn_task and not is_all_entities_task:
+            if not has_creation_date or is_all_entities_task:
+                # The key fix: use gap analysis instead of frequency
+                if max_gap_exceeds_timedelta or not has_entity_table:
+                    # Large gaps or no entity table -> Pattern B
+                    candidates.append({
+                        "pattern": "B",
+                        "confidence": 0.80,
+                        "lookback": f"'{suggested_lookback_interval}'",
+                        "reason": (
+                            f"P90 inter-event gap ({inter_event_gap_p90:.0f}d) "
+                            f"{'exceeds' if max_gap_exceeds_timedelta else 'and no entity table: entities derived from events.'} "
+                            f"{'timedelta (' + str(timedelta_days) + 'd). EXISTS with self.timedelta would miss entities during long gaps.' if max_gap_exceeds_timedelta else ''} "
+                            f"Use WHERE IN with {suggested_lookback_interval} lookback."
+                        ),
+                    })
+                    if has_entity_table:
+                        candidates.append({
+                            "pattern": "A",
+                            "confidence": 0.30,
+                            "lookback": "self.timedelta",
+                            "reason": (
+                                f"Entity table exists, but p90 gap ({inter_event_gap_p90:.0f}d) > "
+                                f"timedelta ({timedelta_days}d) suggests B is more appropriate."
+                            ),
+                        })
+                else:
+                    # Small gaps + entity table -> Pattern A
+                    candidates.append({
+                        "pattern": "A",
+                        "confidence": 0.75,
+                        "lookback": "self.timedelta",
+                        "reason": (
+                            f"Entity table exists and p90 gap ({inter_event_gap_p90:.0f}d) <= "
+                            f"timedelta ({timedelta_days}d). Events are regular enough for "
+                            f"EXISTS with self.timedelta."
+                        ),
+                    })
+                    candidates.append({
+                        "pattern": "B",
+                        "confidence": 0.35,
+                        "lookback": f"'{suggested_lookback_interval}'",
+                        "reason": (
+                            f"Could use Pattern B with {suggested_lookback_interval} lookback, "
+                            f"but entity table + small gaps favor Pattern A."
+                        ),
+                    })
+
+        # Sort by confidence descending
+        candidates.sort(key=lambda c: c["confidence"], reverse=True)
+
+        # ================================================================
+        # Section 6: Building Block Suggestions
+        # ================================================================
+        # Detect nested JOIN need: when entity table has an ID that is shared
+        # with the event table (direct or via case-insensitive match), suggesting
+        # the entity-event pre-join pattern (e.g., UserInfo LEFT JOIN VisitStream)
+        entity_col_lower = entity_col.lower()
+        entity_col_in_event = (
+            entity_col in event_table_cols
+            or any(c.lower() == entity_col_lower for c in event_table_cols)
+        )
+        # needs_nested_join: entity table exists and shares the entity_col with
+        # event table (suggesting entity-event pre-join for temporal filtering)
+        _needs_nested_join = (
+            has_entity_table
+            and entity_col_in_event
+            and len(potential_join_tables) > 0
+        )
+
+        # Detect CTE need: multiple event-like tables (>= 2 tables share columns
+        # with the event table) or multiple related event sources
+        _needs_cte = len(potential_join_tables) >= 2
+
+        building_blocks = {
+            "needs_cte": _needs_cte,
+            "needs_nested_join": _needs_nested_join,
+            "needs_quality_filter": any(
+                kw in task_lower for kw in [
+                    'rating', 'star', 'quality', 'detailed', 'specific',
+                    'click', 'successful', 'primary', 'severe',
+                ]
+            ),
+            "needs_having": any(
+                kw in task_lower for kw in [
+                    'assuming', 'given that', 'if active', 'has at least',
+                    'with at least', 'only for', 'who have', 'that have',
+                ]
+            ),
+        }
+
+        # ================================================================
+        # Build the top-level recommendation (for backward compatibility)
+        # ================================================================
+        top_candidate = candidates[0] if candidates else {"pattern": "A", "lookback": "self.timedelta"}
+        top_pattern = top_candidate["pattern"]
+        top_lookback = top_candidate.get("lookback")
+
+        pattern_descriptions = {
+            "A": "Cross join entity table + EXISTS filter with self.timedelta lookback.",
+            "B": "LEFT JOIN event table + WHERE IN subquery with data-driven lookback.",
+            "C": "Cross join entity table + LEFT JOIN events + COALESCE(agg, 0). No activity filter.",
+            "D": "LEFT JOIN entity table ON creation_date <= timestamp + LEFT JOIN events for forward window.",
+            "Link": "LEFT JOIN event table + GROUP BY source entity + LIST(DISTINCT dest entity).",
+        }
+
+        return {
+            "status": "success",
+            # Top-level recommendation (backward compat)
+            "recommended_pattern": top_pattern,
+            "lookback_window": top_lookback,
+            "pattern_description": pattern_descriptions.get(top_pattern, ""),
+            "reasoning": top_candidate.get("reason", ""),
+            # Rich analysis sections
+            "entity_source": entity_source,
+            "temporal": temporal,
+            "semantic": semantic,
+            "schema_hints": schema_hints,
+            "pattern_candidates": candidates,
+            "building_blocks": building_blocks,
+            # Backward compat fields
+            "is_churn_task": is_churn_task,
+            "is_all_entities_task": is_all_entities_task,
+            "entity_creation_col": entity_creation_col,
+            "evidence": {
+                "total_events": int(total_events),
+                "unique_entities": unique_entities,
+                "events_per_day": round(events_per_day, 2),
+                "median_events_per_entity": round(median_events_per_entity, 2),
+                "median_events_per_window": round(float(median_events_per_entity / num_windows), 4),
+                "inter_event_gap_p90_days": round(inter_event_gap_p90, 1),
+                "max_gap_exceeds_timedelta": max_gap_exceeds_timedelta,
+                "date_range_days": date_range_days,
+                "timedelta_days": timedelta_days,
+            },
+            "must_use_lookback": top_lookback,
+            "must_use_pattern": top_pattern,
+        }
+
+    except Exception as e:
+        return {"status": "error", "error": str(e)}
 
 
 @langchain_tool
@@ -13,272 +538,31 @@ def determine_lookback_window(
     entity_table: str = ""
 ) -> Dict[str, Any]:
     """
-    Determine the correct lookback window and SQL pattern for the training table.
-    MUST be called before designing the SQL query (Step 4 of the workflow).
-
-    Analyzes the data to recommend one of five patterns:
-    - Pattern A: Churn/absence -- cross join entity table + EXISTS with self.timedelta
-    - Pattern B: Sparse events -- LEFT JOIN event table + WHERE IN with data-driven lookback
-    - Pattern C: All-entity regression -- cross join entity table + COALESCE, no filter
-    - Pattern D: Entity-creation filter -- LEFT JOIN entity ON creation_date <= timestamp
-    - Link: Link prediction -- LEFT JOIN event table + LIST(DISTINCT)
+    Backward-compatible wrapper for analyze_task_structure().
+    Calls analyze_task_structure and returns results in the same format.
+    Prefer calling analyze_task_structure() directly for richer analysis.
 
     Args:
         csv_dir: Directory containing CSV files
         event_table: Name of the event/fact table CSV (without .csv extension)
         entity_col: Column name identifying the entity (e.g., 'customer_id')
-        time_col: Column name for the temporal column in the event table (e.g., 't_dat')
-        timedelta_days: The prediction window in days (e.g., 7 for weekly churn)
-        task_description: Brief description of the task (e.g., 'predict customer churn')
-        entity_table: Name of the entity/dimension table CSV (without .csv extension).
-            If provided, the tool checks whether the entity table has a creation/start
-            date column, which would indicate Pattern D.
+        time_col: Column name for the temporal column in the event table
+        timedelta_days: The prediction window in days
+        task_description: Brief description of the task
+        entity_table: Name of the entity/dimension table CSV (without .csv extension)
 
     Returns:
-        Recommended lookback window with evidence and SQL pattern to use
+        Analysis results with recommended pattern and lookback window
     """
-    import os
-    import pandas as pd
-
-    try:
-        csv_dir = os.path.abspath(csv_dir)
-        file_path = os.path.join(csv_dir, f"{event_table}.csv")
-
-        if not os.path.exists(file_path):
-            return {
-                "status": "error",
-                "error": f"Event table CSV not found: {file_path}"
-            }
-
-        df = pd.read_csv(file_path)
-
-        if entity_col not in df.columns:
-            return {
-                "status": "error",
-                "error": f"Entity column '{entity_col}' not found in {event_table}.csv"
-            }
-        if time_col not in df.columns:
-            return {
-                "status": "error",
-                "error": f"Time column '{time_col}' not found in {event_table}.csv"
-            }
-
-        # Parse time column
-        df[time_col] = pd.to_datetime(df[time_col], errors='coerce')
-        df = df.dropna(subset=[time_col])
-
-        task_lower = task_description.lower()
-
-        # --- Pattern D detection: entity table has a creation/start date ---
-        entity_creation_col = None
-        is_pattern_d_candidate = False
-        if entity_table:
-            entity_file = os.path.join(csv_dir, f"{entity_table}.csv")
-            if os.path.exists(entity_file):
-                try:
-                    entity_df = pd.read_csv(entity_file, nrows=100)
-                    creation_signals = [
-                        'creation', 'created', 'start_date', 'publish',
-                        'registered', 'signup', 'join_date', 'enrollment',
-                    ]
-                    for col in entity_df.columns:
-                        col_lower = col.lower()
-                        if col_lower.endswith('id') or col_lower == 'id':
-                            continue
-                        if any(sig in col_lower for sig in creation_signals):
-                            # Verify it parses as a date
-                            try:
-                                parsed = pd.to_datetime(entity_df[col], errors='coerce')
-                                if parsed.notna().sum() > len(entity_df) * 0.3:
-                                    entity_creation_col = col
-                                    is_pattern_d_candidate = True
-                                    break
-                            except Exception:
-                                pass
-                except Exception:
-                    pass
-
-        # --- Churn/absence detection (highest priority) ---
-        churn_keywords = [
-            'churn', 'no activity', 'no transaction', 'inactive',
-            'absence', 'will not', "won't", 'stop', 'leave',
-            'retain', 'retention', 'lapse', 'dormant',
-        ]
-        is_churn_task = any(kw in task_lower for kw in churn_keywords)
-
-        # --- Link prediction detection ---
-        link_keywords = [
-            'list of', 'recommend', 'which items', 'purchase list',
-            'link prediction', 'map@', 'precision@', 'recall@',
-        ]
-        is_link_task = any(kw in task_lower for kw in link_keywords)
-
-        # --- All-entity regression detection (Pattern C) ---
-        catalog_entity_signals = [
-            'article', 'product', 'item', 'post', 'listing',
-            'study', 'trial', 'facility', 'site', 'ad',
-        ]
-        aggregate_regression_signals = [
-            'total', 'sum of', 'sales', 'revenue', 'ltv',
-            'popularity', 'count of', 'clicks', 'votes', 'ctr',
-            'how much', 'how many', 'number of', 'mae', 'rmse',
-        ]
-        active_qualifier_keywords = [
-            'active', 'recently', 'recent ', 'engaged', 'retained',
-            'previously purchased', 'previously active',
-        ]
-        entity_is_catalog = any(kw in entity_col.lower() for kw in catalog_entity_signals)
-        is_aggregate_regression = any(kw in task_lower for kw in aggregate_regression_signals)
-        has_active_qualifier = any(kw in task_lower for kw in active_qualifier_keywords)
-
-        is_all_entities_task = (
-            entity_is_catalog
-            and is_aggregate_regression
-            and not is_churn_task
-            and not has_active_qualifier
-        )
-
-        # --- Compute entity-level event frequency (used for A vs B decision) ---
-        timedelta = pd.Timedelta(days=timedelta_days)
-        date_range = df[time_col].max() - df[time_col].min()
-        num_windows = max(date_range / timedelta, 1)
-
-        entity_event_counts = df.groupby(entity_col).size()
-        median_events_per_entity = entity_event_counts.median()
-        median_events_per_window = median_events_per_entity / num_windows
-
-        total_events = len(df)
-        unique_entities = df[entity_col].nunique()
-        events_per_day = total_events / max(date_range.days, 1)
-
-        # ===================== Decision logic =====================
-
-        if is_link_task:
-            lookback = None
-            pattern = "Link"
-            reasoning = (
-                f"LINK PREDICTION TASK DETECTED. Use the Link Prediction pattern: "
-                f"LEFT JOIN event table on the forward window, GROUP BY source entity, "
-                f"LIST(DISTINCT destination entity). No activity filter needed."
-            )
-        elif is_churn_task:
-            lookback = "self.timedelta"
-            pattern = "A"
-            reasoning = (
-                f"CHURN/ABSENCE TASK DETECTED. The lookback window MUST equal "
-                f"self.timedelta (={timedelta_days} days) so that the 'previously active' "
-                f"window is symmetric with the prediction window. Use Pattern A "
-                f"(cross join entity table + EXISTS filter with self.timedelta)."
-            )
-        elif is_pattern_d_candidate and not is_all_entities_task:
-            lookback = None
-            pattern = "D"
-            reasoning = (
-                f"ENTITY-CREATION FILTER DETECTED. The entity table '{entity_table}' "
-                f"has a creation/start date column '{entity_creation_col}'. "
-                f"Use Pattern D: LEFT JOIN entity_table ON {entity_creation_col} <= t.timestamp, "
-                f"then LEFT JOIN event table for the forward window. "
-                f"This ensures only entities that existed before each timestamp are included."
-            )
-        elif is_all_entities_task:
-            lookback = None
-            pattern = "C"
-            reasoning = (
-                f"ALL-ENTITY REGRESSION TASK DETECTED (entity_col='{entity_col}', "
-                f"catalog signals matched). A target of zero is semantically valid "
-                f"(e.g., 0 sales means no sales this week, not missing data). "
-                f"Do NOT filter entities by recent activity. Use Pattern C: "
-                f"cross join entity table + LEFT JOIN events + COALESCE(SUM/COUNT, 0). "
-                f"No WHERE EXISTS or WHERE IN clause for the entity population."
-            )
-        elif median_events_per_window >= 0.5:
-            lookback = "self.timedelta"
-            pattern = "A"
-            reasoning = (
-                f"FREQUENT ACTIVITY (non-churn): Median {median_events_per_window:.2f} events "
-                f"per entity per {timedelta_days}-day window. Use Pattern A "
-                f"(cross join entity table + EXISTS filter with self.timedelta)."
-            )
-        else:
-            # Sparse activity: compute a data-driven lookback window.
-            try:
-                df_sorted = df[[entity_col, time_col]].sort_values(
-                    [entity_col, time_col]
-                )
-                df_sorted = df_sorted.assign(
-                    prev_time=df_sorted.groupby(entity_col)[time_col].shift(1)
-                )
-                gap_days_series = (
-                    df_sorted[time_col] - df_sorted["prev_time"]
-                ).dt.days.dropna()
-                median_gap_days = float(gap_days_series.median()) if len(gap_days_series) else float(date_range.days)
-            except Exception:
-                median_gap_days = float(date_range.days)
-
-            raw_lookback_days = max(
-                int(median_gap_days * 4),
-                timedelta_days * 4,
-                30,
-            )
-            raw_lookback_days = min(raw_lookback_days, int(date_range.days))
-
-            if raw_lookback_days >= 548:
-                lookback_str = "2 years"
-            elif raw_lookback_days >= 274:
-                lookback_str = "1 year"
-            elif raw_lookback_days >= 137:
-                lookback_str = "6 months"
-            elif raw_lookback_days >= 60:
-                lookback_str = "3 months"
-            else:
-                lookback_str = f"{raw_lookback_days} days"
-
-            lookback = f"'{lookback_str}'"
-            pattern = "B"
-            reasoning = (
-                f"SPARSE ACTIVITY (non-churn): Median {median_events_per_window:.2f} events "
-                f"per entity per {timedelta_days}-day window. Median inter-event gap: "
-                f"{median_gap_days:.0f} days. Computed lookback: {lookback_str} "
-                f"(= max(gap*4={int(median_gap_days*4)}d, timedelta*4={timedelta_days*4}d), "
-                f"rounded to clean interval, capped at data range). "
-                f"Use Pattern B (LEFT JOIN event table + WHERE IN with {lookback} lookback)."
-            )
-
-        pattern_descriptions = {
-            "A": "Cross join entity table + EXISTS filter with self.timedelta lookback.",
-            "B": "LEFT JOIN event table + WHERE IN subquery with data-driven lookback.",
-            "C": "Cross join entity table + LEFT JOIN events + COALESCE(agg, 0). No activity filter.",
-            "D": "LEFT JOIN entity table ON creation_date <= timestamp + LEFT JOIN events for forward window.",
-            "Link": "LEFT JOIN event table + GROUP BY source entity + LIST(DISTINCT dest entity).",
-        }
-
-        return {
-            "status": "success",
-            "lookback_window": lookback,
-            "recommended_pattern": pattern,
-            "pattern_description": pattern_descriptions.get(pattern, ""),
-            "reasoning": reasoning,
-            "is_churn_task": is_churn_task,
-            "is_all_entities_task": is_all_entities_task,
-            "entity_creation_col": entity_creation_col,
-            "evidence": {
-                "total_events": int(total_events),
-                "unique_entities": int(unique_entities),
-                "events_per_day": round(events_per_day, 2),
-                "median_events_per_entity": round(float(median_events_per_entity), 2),
-                "median_events_per_window": round(float(median_events_per_window), 4),
-                "date_range_days": int(date_range.days),
-                "timedelta_days": timedelta_days,
-            },
-            "must_use_lookback": lookback,
-            "must_use_pattern": pattern,
-        }
-
-    except Exception as e:
-        return {
-            "status": "error",
-            "error": str(e)
-        }
+    return analyze_task_structure.invoke({
+        "csv_dir": csv_dir,
+        "event_table": event_table,
+        "entity_col": entity_col,
+        "time_col": time_col,
+        "timedelta_days": timedelta_days,
+        "task_description": task_description,
+        "entity_table": entity_table,
+    })
 
 
 @langchain_tool

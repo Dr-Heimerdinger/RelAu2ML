@@ -167,10 +167,15 @@ EXECUTE THE TOOL CALL NOW.
             
             if eda.get("suggested_splits"):
                 splits = eda["suggested_splits"]
-                if splits.get("val_timestamp"):
-                    context_parts.append(f"Suggested val_timestamp: {splits['val_timestamp']}")
-                if splits.get("test_timestamp"):
-                    context_parts.append(f"Suggested test_timestamp: {splits['test_timestamp']}")
+                # EDA produces train_end/val_end/test_end keys:
+                # train_end (70th percentile) = train/val boundary → val_timestamp
+                # val_end (85th percentile) = val/test boundary → test_timestamp
+                val_ts = splits.get("val_timestamp") or splits.get("train_end")
+                test_ts = splits.get("test_timestamp") or splits.get("val_end")
+                if val_ts:
+                    context_parts.append(f"Suggested val_timestamp: {val_ts}")
+                if test_ts:
+                    context_parts.append(f"Suggested test_timestamp: {test_ts}")
             
             if eda.get("relationship_analysis"):
                 context_parts.append("Relationship Analysis:")
@@ -248,6 +253,32 @@ You stopped before calling register_dataset_code() OR the file was not created.
             dataset_info["class_name"] = "GenDataset"
             dataset_info["file_path"] = dataset_path
             logger.info(f"Dataset file created at: {dataset_path}")
+
+            # Extract val/test timestamps from generated dataset.py
+            try:
+                import ast as _ast
+                with open(dataset_path) as f:
+                    tree = _ast.parse(f.read())
+                for node in _ast.walk(tree):
+                    if isinstance(node, _ast.Assign):
+                        for target in node.targets:
+                            if isinstance(target, _ast.Name):
+                                if target.id == 'val_timestamp' and isinstance(node.value, _ast.Call):
+                                    if node.value.args and isinstance(node.value.args[0], _ast.Constant):
+                                        dataset_info["val_timestamp"] = node.value.args[0].value
+                                elif target.id == 'test_timestamp' and isinstance(node.value, _ast.Call):
+                                    if node.value.args and isinstance(node.value.args[0], _ast.Constant):
+                                        dataset_info["test_timestamp"] = node.value.args[0].value
+            except Exception:
+                pass  # non-critical fallback; task builder validates timestamps directly
+
+            # Warn if timestamps are None — this will crash downstream
+            if not dataset_info.get("val_timestamp") or not dataset_info.get("test_timestamp"):
+                logger.warning(
+                    "Dataset generated with None timestamps — this will crash task initialization. "
+                    "The dataset builder agent should always set val_timestamp and test_timestamp."
+                )
+
             base_result["dataset_info"] = dataset_info
             base_result["current_phase"] = PipelinePhase.TASK_BUILDING.value
         else:
