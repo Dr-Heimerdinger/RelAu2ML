@@ -6,15 +6,15 @@ import duckdb
 from plexe.relbench.base import Database, Table, EntityTask, TaskType, Dataset
 from plexe.relbench.metrics import accuracy, f1, roc_auc, average_precision
 
-from workdir.rel_hm_user_churn_2.dataset import GenDataset
-from workdir.rel_hm_user_churn_2.task import GenTask
+from workdir.rel_f1_driver_position_3.dataset import GenDataset
+from workdir.rel_f1_driver_position_3.task import GenTask
 
-from plexe.relbench.tasks.hm import UserChurnTask
+from plexe.relbench.tasks.f1 import DriverPositionTask
 
-csv_dir = '/home/ta/kl/plexe-clone/workdir/rel_hm_user_churn_2/csv_files'
+csv_dir = '/home/ta/kl/plexe-clone/workdir/rel_f1_driver_position_3/csv_files'
 dataset = GenDataset(csv_dir=csv_dir)
 gen_task = GenTask(dataset)
-root_task = UserChurnTask(dataset)
+root_task = DriverPositionTask(dataset)
 
 db = dataset.get_db()
 
@@ -25,7 +25,7 @@ print(gen_table)
 print(f"\nShape: {gen_table.df.shape}")
 
 print("\n" + "=" * 60)
-print("Training Table from UserChurnTask (author):")
+print("Training Table from DriverPositionTask (author):")
 author_table = root_task.get_table("train")
 print(author_table)
 print(f"\nShape: {author_table.df.shape}")
@@ -34,7 +34,7 @@ print(f"\nShape: {author_table.df.shape}")
 print("\n" + "=" * 60)
 print("COMPARISON:")
 print(f"  GenTask rows: {len(gen_table.df)}")
-print(f"  UserChurnTask rows:    {len(author_table.df)}")
+print(f"  DriverPositionTask rows:    {len(author_table.df)}")
 print(f"  Row counts match:      {len(gen_table.df) == len(author_table.df)}")
 
 # Check if the dataframes have the same content (sort both for comparison)

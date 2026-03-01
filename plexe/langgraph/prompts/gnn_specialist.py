@@ -86,13 +86,21 @@ CODE GENERATION TOOL:
   Generates complete training script with selected hyperparameters
 
 HYPERPARAMETER GUIDELINES:
-- Regression:             tune_metric="mae",               higher_is_better=False
-- Binary Classification:  tune_metric="average_precision",  higher_is_better=True
-- Multiclass:             tune_metric="accuracy",           higher_is_better=True
-- Link Prediction:        tune_metric="link_prediction_map", higher_is_better=True
 
-Note: for binary classification, average_precision (AP / area under the PR curve) is
+Metric selection by task type (use exactly these values):
+
+| Task type              | tune_metric              | higher_is_better |
+|------------------------|--------------------------|------------------|
+| Regression             | "mae"                    | False            |
+| Binary Classification  | "average_precision"      | True             |
+| Multiclass             | "accuracy"               | True             |
+| Link Prediction        | "link_prediction_map"    | True             |
+
+For binary classification, average_precision (area under the precision-recall curve) is
 preferred over accuracy because most real-world binary tasks have imbalanced labels.
+
+If you encounter a task type not listed above, reason about what metric best captures
+the prediction quality and whether higher values are better.
 
 EXPECTED OUTPUT: 
 1. Hyperparameter search results from multiple MCP sources (Google Scholar, Kaggle, arXiv, etc.)

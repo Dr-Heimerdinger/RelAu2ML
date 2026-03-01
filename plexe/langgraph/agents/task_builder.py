@@ -226,37 +226,55 @@ You CANNOT proceed without dataset.py. Report this error.
             if eda.get("suggested_timedelta"):
                 context_parts.append(f"\nSuggested prediction window: {eda.get('suggested_timedelta')}")
         
+        # Compute the val/test gap from dataset_info so the agent knows
+        # the maximum timedelta the dataset can support.
+        ds = state.get("dataset_info") or {}
+        val_ts_str = ds.get("val_timestamp", "")
+        test_ts_str = ds.get("test_timestamp", "")
+        timestamp_gap_days = None
+        if val_ts_str and test_ts_str:
+            try:
+                import pandas as _pd
+                _gap = (_pd.Timestamp(test_ts_str) - _pd.Timestamp(val_ts_str)).days
+                timestamp_gap_days = int(_gap)
+            except Exception:
+                pass
+
         # Task generation instructions
         working_dir = state.get('working_dir', '')
         csv_dir = state.get('csv_dir', '')
         dataset_file = f"{working_dir}/dataset.py"
-        
+
         context_parts.append(f"""
-## Your Task:
-1. Determine if this is an EntityTask or RecommendationTask based on user intent
-2. Identify the entity table and entity column (or src/dst for recommendations)
-3. Determine appropriate time_col (from temporal analysis)
-4. Estimate reasonable timedelta (prediction window) based on temporal data range
-5. **MANDATORY**: Call determine_lookback_window() to get the correct lookback window and SQL pattern
-   - You MUST follow the tool's recommendation for lookback_window and pattern
-6. Design SQL query using the recommended pattern and lookback window from step 5
+## Your Task (follow the Mandatory Workflow in the system prompt):
+1. Determine task type from user intent and metric
+2. Validate dataset timestamps: call validate_dataset_timestamps("{dataset_file}", "{csv_dir}", timedelta_days)
+   where timedelta_days is the prediction window you plan to use.{f'''
+   NOTE: Current val/test gap is {timestamp_gap_days} days. Your timedelta MUST be <= {timestamp_gap_days}.''' if timestamp_gap_days else ''}
+   If invalid, fix with fix_dataset_timestamps() before proceeding.
+3. Choose base class (EntityTask or RecommendationTask)
+4. Call determine_lookback_window() to get the correct lookback window and SQL pattern.
+   You MUST follow the tool's recommendation for lookback_window and pattern.
+5. Identify entity table, entity column, time column, and target column
+6. Design SQL query using the recommended pattern and lookback window from step 4
 7. Choose appropriate metrics based on task type
 8. For link prediction: set eval_k (typical: 10-12)
 9. Test your SQL: test_sql_query("{csv_dir}", query)
 10. Generate complete code and save: register_task_code(code, "GenTask", "{working_dir}/task.py", task_type)
 
-## File Paths (IMPORTANT - Use these exact paths):
+## File Paths:
 - Dataset file: {dataset_file}
 - CSV directory: {csv_dir}
 - Task output: {working_dir}/task.py
 
-CRITICAL REMINDERS:
+## Reminders:
 - Use TaskType enum: TaskType.BINARY_CLASSIFICATION, TaskType.REGRESSION, TaskType.LINK_PREDICTION
 - Import correct base class: EntityTask or RecommendationTask
 - Import only metrics you use from plexe.relbench.metrics
-- Convert timestamps: timestamp_df = pd.DataFrame({{"timestamp": timestamps}})
-- Use duckdb.sql() method, not conn.execute()
-- Return Table object with proper fkey_col_to_pkey_table mapping
+- Column names in SQL must exactly match CSV column names (use get_csv_files_info to verify)
+- time_col value must match the timestamp column name in the SQL output
+- Use duckdb.register() for every DataFrame, then duckdb.sql()
+- Return Table with proper fkey_col_to_pkey_table mapping
 """)
         
         return "\n".join(context_parts)

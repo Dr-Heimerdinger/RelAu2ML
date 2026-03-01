@@ -32,7 +32,20 @@ Suggest `val_timestamp` and `test_timestamp` based on the primary event table's 
 - Validation: next 15 % (val_timestamp = 70th-percentile event date).
 - Test: final 15 % (test_timestamp = 85th-percentile event date).
 
-Use timestamps from the most active event table (highest row count with a datetime column), not a mix of all tables. Ensure the gap between val and test is at least as large as the expected prediction window.
+Use timestamps from the most active event table (highest row count with a datetime column), not a mix of all tables. Ensure the gap between val and test is at least as large as the expected prediction window (minimum 7 days; ideally 30 days or more).
+
+## Timedelta estimation
+
+Based on the event frequency, suggest an appropriate prediction window (timedelta) for downstream agents:
+
+| Event frequency              | Suggested timedelta |
+|------------------------------|---------------------|
+| Multiple events per day      | 4-7 days            |
+| Weekly events                | 7-14 days           |
+| Monthly events               | 30-60 days          |
+| Quarterly or rarer events    | 90-365 days         |
+
+Include this estimate in your summary so the Dataset Builder can ensure the timestamp gap is sufficient.
 
 ## Output for downstream agents
 

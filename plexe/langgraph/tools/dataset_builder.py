@@ -166,15 +166,22 @@ def get_temporal_statistics(csv_dir: str) -> Dict[str, Any]:
             val_ts = unique_timestamps[int(n * 0.7)]
             test_ts = unique_timestamps[int(n * 0.85)]
 
-            # Enforce a minimum gap of 1 day between val and test so they are
-            # never identical. The task-specific timedelta requirement is enforced
-            # later by validate_dataset_timestamps / fix_dataset_timestamps.
+            # Enforce a minimum gap between val and test.
+            # Most prediction tasks use a timedelta of 7-30 days, so the gap
+            # between val and test must be at least that large. We use 7 days
+            # as the floor here; the task builder's validate_dataset_timestamps
+            # will catch cases where the actual timedelta is larger.
+            MIN_GAP = pd.Timedelta(days=7)
             time_diff = test_ts - val_ts
-            if time_diff < pd.Timedelta(days=1):
-                test_ts = val_ts + pd.Timedelta(days=1)
+            if time_diff < MIN_GAP:
+                # Try to push test_ts forward
+                test_ts = val_ts + MIN_GAP
                 if test_ts > unique_timestamps[-1]:
+                    # Cannot push test forward; pull val back instead
                     test_ts = unique_timestamps[-1]
-                    val_ts = test_ts - pd.Timedelta(days=1)
+                    val_ts = test_ts - MIN_GAP
+                    if val_ts < unique_timestamps[0]:
+                        val_ts = unique_timestamps[0]
 
             suggested_splits = {
                 "val_timestamp": str(val_ts),

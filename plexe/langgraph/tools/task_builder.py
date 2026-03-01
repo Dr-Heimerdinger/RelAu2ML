@@ -9,25 +9,30 @@ def determine_lookback_window(
     entity_col: str,
     time_col: str,
     timedelta_days: int,
-    task_description: str
+    task_description: str,
+    entity_table: str = ""
 ) -> Dict[str, Any]:
     """
-    Determine the correct lookback window for active entity filtering.
+    Determine the correct lookback window and SQL pattern for the training table.
     MUST be called before designing the SQL query (Step 4 of the workflow).
 
-    Analyzes the data to determine the correct lookback window and SQL pattern.
-    For churn tasks the lookback is always self.timedelta (semantic requirement).
-    For all-entity regression tasks no activity filter is used (Pattern C).
-    For sparse-event tasks the lookback is computed from the actual median
-    inter-event interval in the data and rounded to a clean SQL INTERVAL string.
+    Analyzes the data to recommend one of five patterns:
+    - Pattern A: Churn/absence -- cross join entity table + EXISTS with self.timedelta
+    - Pattern B: Sparse events -- LEFT JOIN event table + WHERE IN with data-driven lookback
+    - Pattern C: All-entity regression -- cross join entity table + COALESCE, no filter
+    - Pattern D: Entity-creation filter -- LEFT JOIN entity ON creation_date <= timestamp
+    - Link: Link prediction -- LEFT JOIN event table + LIST(DISTINCT)
 
     Args:
         csv_dir: Directory containing CSV files
         event_table: Name of the event/fact table CSV (without .csv extension)
         entity_col: Column name identifying the entity (e.g., 'customer_id')
-        time_col: Column name for the temporal column (e.g., 't_dat')
+        time_col: Column name for the temporal column in the event table (e.g., 't_dat')
         timedelta_days: The prediction window in days (e.g., 7 for weekly churn)
         task_description: Brief description of the task (e.g., 'predict customer churn')
+        entity_table: Name of the entity/dimension table CSV (without .csv extension).
+            If provided, the tool checks whether the entity table has a creation/start
+            date column, which would indicate Pattern D.
 
     Returns:
         Recommended lookback window with evidence and SQL pattern to use
@@ -64,7 +69,36 @@ def determine_lookback_window(
 
         task_lower = task_description.lower()
 
-        # Detect churn/absence/engagement tasks (semantic check — highest priority)
+        # --- Pattern D detection: entity table has a creation/start date ---
+        entity_creation_col = None
+        is_pattern_d_candidate = False
+        if entity_table:
+            entity_file = os.path.join(csv_dir, f"{entity_table}.csv")
+            if os.path.exists(entity_file):
+                try:
+                    entity_df = pd.read_csv(entity_file, nrows=100)
+                    creation_signals = [
+                        'creation', 'created', 'start_date', 'publish',
+                        'registered', 'signup', 'join_date', 'enrollment',
+                    ]
+                    for col in entity_df.columns:
+                        col_lower = col.lower()
+                        if col_lower.endswith('id') or col_lower == 'id':
+                            continue
+                        if any(sig in col_lower for sig in creation_signals):
+                            # Verify it parses as a date
+                            try:
+                                parsed = pd.to_datetime(entity_df[col], errors='coerce')
+                                if parsed.notna().sum() > len(entity_df) * 0.3:
+                                    entity_creation_col = col
+                                    is_pattern_d_candidate = True
+                                    break
+                            except Exception:
+                                pass
+                except Exception:
+                    pass
+
+        # --- Churn/absence detection (highest priority) ---
         churn_keywords = [
             'churn', 'no activity', 'no transaction', 'inactive',
             'absence', 'will not', "won't", 'stop', 'leave',
@@ -72,10 +106,14 @@ def determine_lookback_window(
         ]
         is_churn_task = any(kw in task_lower for kw in churn_keywords)
 
-        # Detect "predict for ALL entities" tasks (Pattern C):
-        # These are regression tasks where the entity is a catalog item (article,
-        # product, post, study, ad) and the target is an aggregate value that can be 0.
-        # Such tasks should NOT filter entities by recent activity.
+        # --- Link prediction detection ---
+        link_keywords = [
+            'list of', 'recommend', 'which items', 'purchase list',
+            'link prediction', 'map@', 'precision@', 'recall@',
+        ]
+        is_link_task = any(kw in task_lower for kw in link_keywords)
+
+        # --- All-entity regression detection (Pattern C) ---
         catalog_entity_signals = [
             'article', 'product', 'item', 'post', 'listing',
             'study', 'trial', 'facility', 'site', 'ad',
@@ -100,7 +138,7 @@ def determine_lookback_window(
             and not has_active_qualifier
         )
 
-        # Compute entity-level event frequency (used for A vs B decision)
+        # --- Compute entity-level event frequency (used for A vs B decision) ---
         timedelta = pd.Timedelta(days=timedelta_days)
         date_range = df[time_col].max() - df[time_col].min()
         num_windows = max(date_range / timedelta, 1)
@@ -113,11 +151,17 @@ def determine_lookback_window(
         unique_entities = df[entity_col].nunique()
         events_per_day = total_events / max(date_range.days, 1)
 
-        # Decision logic
-        if is_churn_task:
-            # RULE: For churn/absence tasks, lookback MUST equal timedelta.
-            # Churn means "was active in the preceding window, not active in the next."
-            # Using a longer lookback would include stale entities and distort labels.
+        # ===================== Decision logic =====================
+
+        if is_link_task:
+            lookback = None
+            pattern = "Link"
+            reasoning = (
+                f"LINK PREDICTION TASK DETECTED. Use the Link Prediction pattern: "
+                f"LEFT JOIN event table on the forward window, GROUP BY source entity, "
+                f"LIST(DISTINCT destination entity). No activity filter needed."
+            )
+        elif is_churn_task:
             lookback = "self.timedelta"
             pattern = "A"
             reasoning = (
@@ -126,10 +170,17 @@ def determine_lookback_window(
                 f"window is symmetric with the prediction window. Use Pattern A "
                 f"(cross join entity table + EXISTS filter with self.timedelta)."
             )
+        elif is_pattern_d_candidate and not is_all_entities_task:
+            lookback = None
+            pattern = "D"
+            reasoning = (
+                f"ENTITY-CREATION FILTER DETECTED. The entity table '{entity_table}' "
+                f"has a creation/start date column '{entity_creation_col}'. "
+                f"Use Pattern D: LEFT JOIN entity_table ON {entity_creation_col} <= t.timestamp, "
+                f"then LEFT JOIN event table for the forward window. "
+                f"This ensures only entities that existed before each timestamp are included."
+            )
         elif is_all_entities_task:
-            # RULE: Regression tasks where the entity is a catalog item (article, product,
-            # post, study, ad) and the target is an aggregate value that can be 0 should
-            # include ALL entities without an activity filter.
             lookback = None
             pattern = "C"
             reasoning = (
@@ -141,7 +192,6 @@ def determine_lookback_window(
                 f"No WHERE EXISTS or WHERE IN clause for the entity population."
             )
         elif median_events_per_window >= 0.5:
-            # Frequent activity (non-churn): use self.timedelta lookback
             lookback = "self.timedelta"
             pattern = "A"
             reasoning = (
@@ -150,13 +200,7 @@ def determine_lookback_window(
                 f"(cross join entity table + EXISTS filter with self.timedelta)."
             )
         else:
-            # Sparse activity (non-churn): compute a data-driven lookback window.
-            # Goal: the lookback must be wide enough that most active entities have
-            # had at least a few events within it, even if events are infrequent.
-            #
-            # Strategy: compute the median inter-event gap for entities that have
-            # more than one event, then set lookback = max(gap * 4, timedelta * 4).
-            # Round the result to a human-readable SQL INTERVAL string.
+            # Sparse activity: compute a data-driven lookback window.
             try:
                 df_sorted = df[[entity_col, time_col]].sort_values(
                     [entity_col, time_col]
@@ -172,19 +216,17 @@ def determine_lookback_window(
                 median_gap_days = float(date_range.days)
 
             raw_lookback_days = max(
-                int(median_gap_days * 4),   # cover ~4 median inter-event intervals
-                timedelta_days * 4,          # or at least 4x the prediction window
-                30,                          # floor: at least 30 days
+                int(median_gap_days * 4),
+                timedelta_days * 4,
+                30,
             )
-            # Cap at the actual data range so we never request more data than exists
             raw_lookback_days = min(raw_lookback_days, int(date_range.days))
 
-            # Round to the nearest clean SQL INTERVAL string
-            if raw_lookback_days >= 548:    # ≥ ~18 months
+            if raw_lookback_days >= 548:
                 lookback_str = "2 years"
-            elif raw_lookback_days >= 274:  # ≥ ~9 months
+            elif raw_lookback_days >= 274:
                 lookback_str = "1 year"
-            elif raw_lookback_days >= 137:  # ≥ ~4.5 months
+            elif raw_lookback_days >= 137:
                 lookback_str = "6 months"
             elif raw_lookback_days >= 60:
                 lookback_str = "3 months"
@@ -206,6 +248,8 @@ def determine_lookback_window(
             "A": "Cross join entity table + EXISTS filter with self.timedelta lookback.",
             "B": "LEFT JOIN event table + WHERE IN subquery with data-driven lookback.",
             "C": "Cross join entity table + LEFT JOIN events + COALESCE(agg, 0). No activity filter.",
+            "D": "LEFT JOIN entity table ON creation_date <= timestamp + LEFT JOIN events for forward window.",
+            "Link": "LEFT JOIN event table + GROUP BY source entity + LIST(DISTINCT dest entity).",
         }
 
         return {
@@ -216,6 +260,7 @@ def determine_lookback_window(
             "reasoning": reasoning,
             "is_churn_task": is_churn_task,
             "is_all_entities_task": is_all_entities_task,
+            "entity_creation_col": entity_creation_col,
             "evidence": {
                 "total_events": int(total_events),
                 "unique_entities": int(unique_entities),
@@ -274,10 +319,41 @@ def test_sql_query(
                 file_path = os.path.join(csv_dir, f)
                 conn.execute(f"CREATE TABLE {table_name} AS SELECT * FROM read_csv_auto('{file_path}')")
         
-        # Create a dummy timestamp_df for testing (will be provided by the task at runtime)
-        # This is just for SQL validation
+        # Create a data-aware dummy timestamp_df for SQL validation.
+        # At runtime, the real timestamp_df will be provided by the task framework.
+        # Here we derive a representative date from the loaded tables so that
+        # temporal JOINs find matching rows, producing a more realistic test.
+        all_dates = []
+        for f in os.listdir(csv_dir):
+            if f.endswith('.csv'):
+                try:
+                    tbl = conn.execute(f"SELECT * FROM {f.replace('.csv', '')} LIMIT 0").fetchdf()
+                    for col in tbl.columns:
+                        col_lower = col.lower()
+                        if col_lower.endswith('id') or col_lower == 'id':
+                            continue
+                        try:
+                            sample = conn.execute(
+                                f"SELECT DISTINCT \"{col}\" FROM {f.replace('.csv', '')} "
+                                f"WHERE \"{col}\" IS NOT NULL LIMIT 500"
+                            ).fetchdf()
+                            parsed = pd.to_datetime(sample[col], errors='coerce').dropna()
+                            if len(parsed) > len(sample) * 0.3:
+                                all_dates.extend(parsed.tolist())
+                        except Exception:
+                            pass
+                except Exception:
+                    pass
+
+        if all_dates:
+            sorted_dates = sorted(all_dates)
+            mid = sorted_dates[len(sorted_dates) // 2]
+            base_ts = pd.Timestamp(mid).normalize()
+        else:
+            base_ts = pd.Timestamp('2020-01-01')
+
         timestamps_dummy = pd.DataFrame({
-            'timestamp': pd.date_range('2020-01-01', periods=3, freq='D')
+            'timestamp': pd.date_range(base_ts, periods=3, freq='7D')
         })
         conn.register("timestamp_df", timestamps_dummy)
         
@@ -369,27 +445,32 @@ def register_task_code(
 @langchain_tool
 def validate_dataset_timestamps(
     dataset_file_path: str,
-    csv_dir: str
+    csv_dir: str,
+    timedelta_days: int = 0
 ) -> Dict[str, Any]:
     """
     Validate that dataset timestamps are correctly set.
-    
+
     Checks:
     1. val_timestamp and test_timestamp exist
     2. Timestamps are real dates within the data range (not Unix epoch)
-    3. Sufficient gap between val and test (at least 30 days for timedelta)
-    
+    3. Gap between val and test is >= timedelta_days (prevents the ValueError
+       'timedelta cannot be larger than the difference between val and test timestamps')
+
     Args:
         dataset_file_path: Path to dataset.py file
         csv_dir: Directory containing CSV files for temporal range check
-    
+        timedelta_days: The planned prediction window in days (e.g., 7, 30, 60).
+            If provided, the tool verifies that test_timestamp - val_timestamp >= timedelta_days.
+            This MUST be provided to prevent runtime ValueError.
+
     Returns:
         Validation results with status and any issues found
     """
     import os
     import ast
     import pandas as pd
-    
+
     try:
         # Read the dataset file
         if not os.path.exists(dataset_file_path):
@@ -397,21 +478,20 @@ def validate_dataset_timestamps(
                 "status": "error",
                 "error": f"Dataset file not found: {dataset_file_path}"
             }
-        
+
         with open(dataset_file_path, 'r') as f:
             dataset_code = f.read()
-        
+
         # Parse to find val_timestamp and test_timestamp
         tree = ast.parse(dataset_code)
         val_ts = None
         test_ts = None
-        
+
         for node in ast.walk(tree):
             if isinstance(node, ast.Assign):
                 for target in node.targets:
                     if isinstance(target, ast.Name):
                         if target.id == 'val_timestamp':
-                            # Extract the timestamp string
                             if isinstance(node.value, ast.Call):
                                 if len(node.value.args) > 0:
                                     if isinstance(node.value.args[0], ast.Constant):
@@ -421,91 +501,119 @@ def validate_dataset_timestamps(
                                 if len(node.value.args) > 0:
                                     if isinstance(node.value.args[0], ast.Constant):
                                         test_ts = node.value.args[0].value
-        
+
         if not val_ts or not test_ts:
             return {
                 "status": "error",
                 "error": "Could not find val_timestamp or test_timestamp in dataset.py"
             }
-        
+
         # Parse timestamps
         val_timestamp = pd.Timestamp(val_ts)
         test_timestamp = pd.Timestamp(test_ts)
-        
+
         issues = []
-        
+
         # Check if timestamps are suspiciously close to Unix epoch (1970-01-01)
         epoch = pd.Timestamp("1970-01-01")
         if abs((val_timestamp - epoch).days) < 365:
             issues.append(f"val_timestamp ({val_ts}) is suspiciously close to Unix epoch (1970-01-01)")
         if abs((test_timestamp - epoch).days) < 365:
             issues.append(f"test_timestamp ({test_ts}) is suspiciously close to Unix epoch (1970-01-01)")
-        
+
         # Check gap between val and test
         time_diff = (test_timestamp - val_timestamp).days
+
         if time_diff < 1:
-            # Only flag as issue if timestamps are essentially the same day
-            # The actual required gap depends on the task's timedelta (e.g., 4 days, 7 days, 30 days)
             issues.append(
                 f"Gap between val_timestamp and test_timestamp is only {time_diff} days. "
-                f"Timestamps appear to be the same or very close - this is likely an error."
+                f"Timestamps appear to be the same or inverted."
             )
-        
+
+        # Check gap >= timedelta (the root cause of the ValueError)
+        if timedelta_days > 0 and time_diff < timedelta_days:
+            issues.append(
+                f"CRITICAL: Gap between val_timestamp and test_timestamp ({time_diff} days) "
+                f"is smaller than the planned timedelta ({timedelta_days} days). "
+                f"This will cause a ValueError at task initialization. "
+                f"Fix: choose timestamps so that test_timestamp - val_timestamp >= {timedelta_days} days."
+            )
+
         # Check against actual data range if CSV files available
+        data_min_date = None
+        data_max_date = None
         if csv_dir and os.path.exists(csv_dir):
-            min_date = None
-            max_date = None
-            
             for f in os.listdir(csv_dir):
                 if f.endswith('.csv'):
                     try:
                         df = pd.read_csv(os.path.join(csv_dir, f))
                         for col in df.columns:
+                            col_lower = col.lower()
+                            if col_lower.endswith('id') or col_lower == 'id':
+                                continue
                             try:
                                 dates = pd.to_datetime(df[col], errors='coerce')
                                 if dates.notna().sum() > len(df) * 0.5:
                                     col_min = dates.min()
                                     col_max = dates.max()
-                                    if min_date is None or col_min < min_date:
-                                        min_date = col_min
-                                    if max_date is None or col_max > max_date:
-                                        max_date = col_max
-                            except:
+                                    if pd.notna(col_min) and col_min.year >= 1900:
+                                        if data_min_date is None or col_min < data_min_date:
+                                            data_min_date = col_min
+                                    if pd.notna(col_max) and col_max.year <= 2100:
+                                        if data_max_date is None or col_max > data_max_date:
+                                            data_max_date = col_max
+                            except Exception:
                                 pass
-                    except:
+                    except Exception:
                         pass
-            
-            if min_date and max_date:
-                if val_timestamp < min_date or val_timestamp > max_date:
+
+            if data_min_date and data_max_date:
+                if val_timestamp < data_min_date or val_timestamp > data_max_date:
                     issues.append(
                         f"val_timestamp ({val_ts}) is outside the data range "
-                        f"({min_date.strftime('%Y-%m-%d')} to {max_date.strftime('%Y-%m-%d')})"
+                        f"({data_min_date.strftime('%Y-%m-%d')} to {data_max_date.strftime('%Y-%m-%d')})"
                     )
-                if test_timestamp < min_date or test_timestamp > max_date:
+                if test_timestamp < data_min_date or test_timestamp > data_max_date:
                     issues.append(
                         f"test_timestamp ({test_ts}) is outside the data range "
-                        f"({min_date.strftime('%Y-%m-%d')} to {max_date.strftime('%Y-%m-%d')})"
+                        f"({data_min_date.strftime('%Y-%m-%d')} to {data_max_date.strftime('%Y-%m-%d')})"
                     )
-        
+
         if issues:
+            # Build a recommendation with suggested fix timestamps
+            recommendation = (
+                "Dataset timestamps must be fixed before creating tasks. "
+                "Use fix_dataset_timestamps() to set timestamps where "
+                f"test_timestamp - val_timestamp >= {max(timedelta_days, 1)} days "
+                "and both timestamps fall within the data range."
+            )
+            if data_max_date and timedelta_days > 0:
+                suggested_test = data_max_date - pd.Timedelta(days=max(timedelta_days, 7))
+                suggested_val = suggested_test - pd.Timedelta(days=timedelta_days)
+                recommendation += (
+                    f" Suggested: val_timestamp='{suggested_val.strftime('%Y-%m-%d')}', "
+                    f"test_timestamp='{suggested_test.strftime('%Y-%m-%d')}'."
+                )
+
             return {
                 "status": "invalid",
                 "val_timestamp": val_ts,
                 "test_timestamp": test_ts,
                 "time_diff_days": time_diff,
+                "timedelta_days": timedelta_days,
                 "issues": issues,
-                "recommendation": "Dataset timestamps must be fixed before creating tasks. "
-                                 "Use proper dates within the data range with at least 30 days gap."
+                "recommendation": recommendation,
             }
-        
+
         return {
             "status": "valid",
             "val_timestamp": val_ts,
             "test_timestamp": test_ts,
             "time_diff_days": time_diff,
-            "message": "Dataset timestamps are valid"
+            "timedelta_days": timedelta_days,
+            "message": f"Dataset timestamps are valid (gap={time_diff}d >= timedelta={timedelta_days}d)"
         }
-        
+
     except Exception as e:
         return {
             "status": "error",

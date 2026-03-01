@@ -16,9 +16,13 @@ Purpose: List all CSV files, their columns, and row counts
 ## 2: Call get_temporal_statistics(csv_dir)
 Purpose: Analyze timestamp columns and get val_timestamp/test_timestamp for train/val/test splits
 
-CRITICAL: Verify that val_timestamp and test_timestamp are:
+CRITICAL: Verify that val_timestamp and test_timestamp satisfy ALL of:
 - Real calendar dates (not Unix epoch times like 1970-01-01)
 - Within the actual data range
+- The gap (test_timestamp - val_timestamp) must be >= the expected prediction window.
+  For most tasks the prediction window is 7-30 days, so ensure the gap is at least 30 days
+  unless the user explicitly specifies a shorter window. A gap that is too small will cause
+  a runtime ValueError ("timedelta cannot be larger than the difference between val and test timestamps").
 
 ## 3: ANALYSIS - Write your understanding before generating code:
 - Identify which tables have temporal columns (time_col) vs static tables (time_col=None)
@@ -26,7 +30,10 @@ CRITICAL: Verify that val_timestamp and test_timestamp are:
 - Map foreign key relationships between tables
 - **VERIFY val_timestamp and test_timestamp from Step 2:**
   * Must be real dates within the data range (check min/max from temporal_stats)
-  * If not valid, manually compute appropriate timestamps based on data range
+  * The gap (test - val) must be >= the expected timedelta (at least 30 days by default)
+  * If the suggested timestamps have a gap smaller than 30 days, recompute them:
+    set test_timestamp near the 85th percentile of the data range and
+    val_timestamp = test_timestamp - (at least 30 days)
   * Use format: pd.Timestamp("YYYY-MM-DD")
 - Note any data cleaning requirements (missing values, timezone issues, type conversions)
 
