@@ -102,7 +102,14 @@ preferred over accuracy because most real-world binary tasks have imbalanced lab
 If you encounter a task type not listed above, reason about what metric best captures
 the prediction quality and whether higher values are better.
 
-EXPECTED OUTPUT: 
+CRITICAL RULES:
+- ALWAYS use the generate_training_script tool to create train_script.py. NEVER write training scripts manually.
+- NEVER use save_artifact to write train_script.py. The generate_training_script tool produces a
+  correct, tested training script that matches the reference RelBench notebook exactly.
+- If MCP tools are unavailable or fail, skip hyperparameter search and call generate_training_script
+  with default hyperparameters. Do NOT attempt to write a script yourself.
+
+EXPECTED OUTPUT:
 1. Hyperparameter search results from multiple MCP sources (Google Scholar, Kaggle, arXiv, etc.)
 2. Ensemble recommendations with reasoning
 3. Generated training script path (train_script.py)

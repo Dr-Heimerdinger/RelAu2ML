@@ -149,9 +149,12 @@ You CANNOT proceed without dataset.py. Report this error.
             if isinstance(intent, dict):
                 pred_target = intent.get('prediction_target', 'unknown')
                 task_type = intent.get('task_type', 'unknown')
+                eval_metric = intent.get('evaluation_metric')
                 context_parts.append(f"  - Prediction target: {pred_target}")
                 context_parts.append(f"  - Task type: {task_type}")
-                
+                if eval_metric:
+                    context_parts.append(f"  - User's evaluation metric: {eval_metric}")
+
                 # Suggest appropriate metrics
                 if 'binary' in str(task_type).lower() or 'classification' in str(task_type).lower():
                     context_parts.append(f"  - Suggested metrics: average_precision, accuracy, f1, roc_auc")

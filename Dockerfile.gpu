@@ -45,7 +45,7 @@ RUN uv pip install \
         "ray>=2.9.0" rich smolagents deprecated python-multipart psycopg2-binary \
         featuretools sqlalchemy pytorch-frame pooch duckdb scipy \
         fastapi "uvicorn[standard]" websockets langgraph langchain langchain-openai langchain-google-genai langchain-anthropic \
-        requests openml scholarly kaggle "mcp[all]" nest_asyncio
+        requests openml scholarly kaggle "mcp[all]" nest_asyncio tqdm
  
 # ----------------------------
 # BƯỚC 3: Cài torchvision, torchaudio (torch đã có sẵn từ base image)
@@ -62,7 +62,10 @@ RUN pip install pyg_lib torch_scatter torch_sparse torch_cluster torch_spline_co
 # ----------------------------
 # BƯỚC 5: torch-geometric
 # ----------------------------
-RUN uv pip install torch-geometric torch-frame
+# NOTE: pytorch-frame (PyG tabular) is already installed in step 2.
+# Do NOT install "torch-frame" here — that's a different package (vision framework)
+# which overwrites pytorch-frame's torch_frame namespace.
+RUN uv pip install torch-geometric tensorboard
 
 # ----------------------------
 # BƯỚC 6: sentence-transformers (for text embeddings in GNN training)

@@ -154,3 +154,97 @@ export async function combineDatasets(tables, relationships, connection) {
 
     return await response.json()
 }
+
+/**
+ * List all trained models
+ * @returns {Promise<Object>} List of models
+ */
+export async function listModels() {
+    const response = await fetch(`${API_BASE_URL}/api/models`, { method: 'GET' })
+    if (!response.ok) {
+        const errorData = await response.json().catch(() => ({}))
+        throw new Error(errorData.detail || 'Failed to fetch models')
+    }
+    return await response.json()
+}
+
+/**
+ * Get model details
+ * @param {string} modelId - Model ID
+ * @returns {Promise<Object>} Model details
+ */
+export async function getModel(modelId) {
+    const response = await fetch(`${API_BASE_URL}/api/models/${encodeURIComponent(modelId)}`, { method: 'GET' })
+    if (!response.ok) {
+        const errorData = await response.json().catch(() => ({}))
+        throw new Error(errorData.detail || 'Failed to fetch model')
+    }
+    return await response.json()
+}
+
+/**
+ * Delete a model
+ * @param {string} modelId - Model ID
+ * @returns {Promise<Object>} Delete result
+ */
+export async function deleteModel(modelId) {
+    const response = await fetch(`${API_BASE_URL}/api/models/${encodeURIComponent(modelId)}`, { method: 'DELETE' })
+    if (!response.ok) {
+        const errorData = await response.json().catch(() => ({}))
+        throw new Error(errorData.detail || 'Failed to delete model')
+    }
+    return await response.json()
+}
+
+/**
+ * Rename a model
+ * @param {string} modelId - Model ID
+ * @param {string} newName - New name
+ * @returns {Promise<Object>} Rename result
+ */
+export async function renameModel(modelId, newName) {
+    const response = await fetch(`${API_BASE_URL}/api/models/${encodeURIComponent(modelId)}/rename`, {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ new_name: newName }),
+    })
+    if (!response.ok) {
+        const errorData = await response.json().catch(() => ({}))
+        throw new Error(errorData.detail || 'Failed to rename model')
+    }
+    return await response.json()
+}
+
+/**
+ * Get model input schema
+ * @param {string} modelId - Model ID
+ * @returns {Promise<Object>} Schema info
+ */
+export async function getModelSchema(modelId) {
+    const response = await fetch(`${API_BASE_URL}/api/models/${encodeURIComponent(modelId)}/schema`, { method: 'GET' })
+    if (!response.ok) {
+        const errorData = await response.json().catch(() => ({}))
+        throw new Error(errorData.detail || 'Failed to fetch model schema')
+    }
+    return await response.json()
+}
+
+/**
+ * Run inference on a model
+ * @param {string} modelId - Model ID
+ * @param {File} file - CSV file with input data
+ * @returns {Promise<Object>} Inference results
+ */
+export async function runInference(modelId, file) {
+    const formData = new FormData()
+    formData.append('file', file)
+    const response = await fetch(`${API_BASE_URL}/api/models/${encodeURIComponent(modelId)}/infer`, {
+        method: 'POST',
+        body: formData,
+    })
+    if (!response.ok) {
+        const errorData = await response.json().catch(() => ({}))
+        throw new Error(errorData.detail || 'Inference failed')
+    }
+    return await response.json()
+}

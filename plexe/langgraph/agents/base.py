@@ -202,26 +202,10 @@ class BaseAgent(ABC):
         self.emitter = emitter
         self.tools = tools or []
         
-        # Initialize MCP Manager and load tools using a thread to avoid event loop conflicts
-        import asyncio
-        from concurrent.futures import ThreadPoolExecutor
-        
         self.mcp_manager = MCPManager()
-        
-        def _run_async_init():
-            """Run async MCP initialization in a new event loop within a thread."""
-            loop = asyncio.new_event_loop()
-            asyncio.set_event_loop(loop)
-            try:
-                loop.run_until_complete(self.mcp_manager.initialize())
-                return self.mcp_manager.get_tools()
-            finally:
-                loop.close()
-        
         try:
-            with ThreadPoolExecutor(max_workers=1) as executor:
-                future = executor.submit(_run_async_init)
-                mcp_tools = future.result(timeout=30)
+            self.mcp_manager.initialize_sync(timeout=30)
+            mcp_tools = self.mcp_manager.get_tools()
             if mcp_tools:
                 logger.info(f"Agent {self.name} loaded {len(mcp_tools)} MCP tools")
                 self.tools.extend(mcp_tools)

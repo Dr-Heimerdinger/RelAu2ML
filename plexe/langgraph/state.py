@@ -107,6 +107,8 @@ class PipelineState(TypedDict, total=False):
     dataset_info: Optional[DatasetInfo]
     task_info: Optional[TaskInfo]
     training_result: Optional[TrainingResult]
+    training_script_ready: Optional[bool]
+    training_script_path: Optional[str]
     
     generated_code: Dict[str, str]
     artifacts: List[str]

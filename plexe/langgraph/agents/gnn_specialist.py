@@ -13,7 +13,6 @@ from langchain_core.tools import BaseTool
 from plexe.langgraph.agents.base import BaseAgent
 from plexe.langgraph.config import AgentConfig
 from plexe.langgraph.state import PipelineState, PipelinePhase
-from plexe.langgraph.tools.common import save_artifact
 from plexe.langgraph.tools.gnn_specialist import generate_training_script
 from plexe.langgraph.prompts.gnn_specialist import GNN_SPECIALIST_SYSTEM_PROMPT
 
@@ -34,9 +33,10 @@ class RelationalGNNSpecialistAgent(BaseAgent):
         additional_tools: Optional[List[BaseTool]] = None,
     ):
         # Core GNN-specific tools (non-MCP)
+        # NOTE: save_artifact is intentionally excluded to prevent the LLM from
+        # bypassing generate_training_script and writing broken placeholder scripts.
         tools = [
             generate_training_script,
-            save_artifact,
         ]
         
         if additional_tools:
@@ -161,11 +161,14 @@ EXECUTE THESE STEPS (Training-Free HPO via MCP):
    - arXiv preprints (cutting-edge research)
    - Heuristic rules (dataset-specific)
 
-NOTE: 
+IMPORTANT:
 - All HPO tools are provided via MCP (Model Context Protocol)
 - You have access to 5 knowledge sources: Google Scholar, Kaggle, arXiv, Semantic Scholar, Papers With Code
 - Training execution will be handled by the Operation Agent
 - Focus on selecting optimal hyperparameters WITHOUT training experiments
+- ALWAYS use generate_training_script tool. NEVER write training scripts manually.
+- If MCP tools are unavailable or fail, skip HPO search and call generate_training_script
+  with default hyperparameters immediately. Do NOT write a placeholder script yourself.
 """)
         
         return "\n".join(context_parts)

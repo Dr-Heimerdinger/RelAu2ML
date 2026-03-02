@@ -95,23 +95,30 @@ class ConversationalAgent(BaseAgent):
             "prediction_target": None,
             "entity_type": None,
             "task_type": "binary_classification",  # conservative default
+            "evaluation_metric": None,  # user's stated metric (e.g., "AUROC", "MAE")
             "data_source": "database" if state.get("db_connection_string") else "csv",
             "confirmed": True,
         }
 
-        regression_keywords = [
-            "sum", "total", "sales", "revenue", "amount", "count",
-            "how much", "how many", "average", "mae", "rmse", "r2",
-            "mean absolute", "root mean", "ltv", "lifetime value",
-            "clicks", "votes", "popularity", "number of",
+        # Classification checked FIRST because its keywords ("predict if", "whether",
+        # "will make any") are more specific than regression keywords that may also
+        # appear in the same sentence (e.g., "votes" in "predict if user will make any votes").
+        classification_keywords = [
+            "churn", "leave", "cancel", "dnf", "qualify", "will happen",
+            "yes or no", "probability of", "predict if", "predict whether",
+            "will make any", "will do any", "whether",
+            # Metric names that imply binary classification
+            "auroc", "auc", "roc", "f1 score", "f1-score", "accuracy", "precision and recall",
         ]
         link_prediction_keywords = [
             "recommend", "which items", "list of", "purchase list",
             "map@", "precision@", "recall@", "link prediction",
         ]
-        classification_keywords = [
-            "churn", "leave", "cancel", "dnf", "qualify", "will happen",
-            "yes or no", "probability of", "predict if", "predict whether",
+        regression_keywords = [
+            "sum", "total", "sales", "revenue", "amount", "count",
+            "how much", "how many", "average", "mae", "rmse", "r2",
+            "mean absolute", "root mean", "ltv", "lifetime value",
+            "clicks", "popularity", "number of",
         ]
 
         for msg in state.get("messages", []):
@@ -122,12 +129,27 @@ class ConversationalAgent(BaseAgent):
 
             intent["prediction_target"] = content[:200]
 
-            if any(kw in content_lower for kw in link_prediction_keywords):
+            # Extract user's stated evaluation metric
+            metric_map = {
+                "auroc": "AUROC", "auc": "AUC", "roc": "ROC-AUC",
+                "f1 score": "F1", "f1-score": "F1", "accuracy": "accuracy",
+                "average precision": "average_precision", "ap score": "AP",
+                "mae": "MAE", "rmse": "RMSE", "r2": "R2", "r²": "R2",
+                "mean absolute": "MAE", "root mean": "RMSE",
+                "precision@": "precision@k", "recall@": "recall@k", "map@": "MAP@k",
+            }
+            for kw, metric_name in metric_map.items():
+                if kw in content_lower:
+                    intent["evaluation_metric"] = metric_name
+                    break
+
+            # Check classification FIRST (more specific keywords override ambiguous ones)
+            if any(kw in content_lower for kw in classification_keywords):
+                intent["task_type"] = "binary_classification"
+            elif any(kw in content_lower for kw in link_prediction_keywords):
                 intent["task_type"] = "link_prediction"
             elif any(kw in content_lower for kw in regression_keywords):
                 intent["task_type"] = "regression"
-            elif any(kw in content_lower for kw in classification_keywords):
-                intent["task_type"] = "binary_classification"
             # else: keep default "binary_classification"
             break
 

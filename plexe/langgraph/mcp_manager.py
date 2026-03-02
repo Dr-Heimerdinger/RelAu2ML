@@ -3,6 +3,8 @@ import json
 import os
 import re
 import sys
+import asyncio
+import threading
 from typing import List, Dict, Any, Optional
 from mcp import ClientSession, StdioServerParameters
 from mcp.client.stdio import stdio_client
@@ -13,48 +15,81 @@ from contextlib import AsyncExitStack
 
 logger = logging.getLogger(__name__)
 
+
 class MCPManager:
     """
     Manager for Model Context Protocol (MCP) servers.
-    Provides connectivity and conversion of MCP tools to LangChain tools.
+
+    Uses a persistent background thread with a long-lived event loop so that
+    MCP sessions (and their stdio transports) remain valid for the entire
+    lifetime of the manager.  Both initialization and tool invocations run
+    on this same loop via ``asyncio.run_coroutine_threadsafe``.
     """
-    
+
     def __init__(self, config_path: Optional[str] = None):
         self.config_path = config_path or os.environ.get("MCP_CONFIG_PATH", "mcp_config.json")
         self.sessions: Dict[str, Any] = {}
         self.tools: List[BaseTool] = []
         self._exit_stack = AsyncExitStack()
-        # Load environment variables from .env
         load_dotenv()
-        
-    async def initialize(self):
+
+        self._loop: Optional[asyncio.AbstractEventLoop] = None
+        self._thread: Optional[threading.Thread] = None
+        self._start_background_loop()
+
+    def _start_background_loop(self):
+        """Start a daemon thread that runs an asyncio event loop forever."""
+        self._loop = asyncio.new_event_loop()
+        self._thread = threading.Thread(
+            target=self._run_loop, daemon=True, name="mcp-event-loop"
+        )
+        self._thread.start()
+
+    def _run_loop(self):
+        """Entry point for the background thread."""
+        asyncio.set_event_loop(self._loop)
+        self._loop.run_forever()
+
+    def _run_coroutine(self, coro, timeout: float = 60.0):
+        """Submit a coroutine to the persistent loop and wait for the result."""
+        if self._loop is None or self._loop.is_closed():
+            raise RuntimeError("MCPManager background event loop is not running")
+        future = asyncio.run_coroutine_threadsafe(coro, self._loop)
+        return future.result(timeout=timeout)
+
+    def initialize_sync(self, timeout: float = 30.0):
+        """Synchronous entry point: initialize all MCP server connections."""
+        self._run_coroutine(self._initialize(), timeout=timeout)
+
+    async def _initialize(self):
         """Initialize connections to configured MCP servers."""
         if not os.path.exists(self.config_path):
             logger.warning(f"MCP config not found at {self.config_path}")
             return
-            
+
         try:
             with open(self.config_path, 'r') as f:
                 config = json.load(f)
-                
+
             for server_name, server_config in config.get("mcpServers", {}).items():
                 await self._connect_to_server(server_name, server_config)
-                
+
         except Exception as e:
             logger.error(f"Error initializing MCP Manager: {e}")
+
+    async def initialize(self):
+        """Async entry point (kept for backward compatibility)."""
+        await self._initialize()
 
     async def _connect_to_server(self, name: str, config: Dict[str, Any]):
         """Connect to a specific MCP server and discover tools."""
         try:
             command = config.get("command")
             args = config.get("args", [])
-            
-            # If command is "python", use the current Python interpreter
-            # This ensures we use the venv Python, not system Python
+
             if command == "python":
                 command = sys.executable
-            
-            # Expand environment variables in env config
+
             env_config = config.get("env", {})
             env = {**os.environ}
             for k, v in env_config.items():
@@ -64,83 +99,70 @@ class MCPManager:
                     logger.debug(f"Expanded MCP env var {k}={var_name}")
                 else:
                     env[k] = v
-            
-            # Convert relative paths to absolute
+
             abs_args = []
             for arg in args:
                 if arg.endswith('.py') and not os.path.isabs(arg):
                     abs_args.append(os.path.abspath(arg))
                 else:
                     abs_args.append(arg)
-            
+
             params = StdioServerParameters(command=command, args=abs_args, env=env)
-            
-            # Use proper async context manager pattern
+
             logger.info(f"Connecting to MCP server: {name}...")
-            
+
             client_ctx = stdio_client(params)
             streams = await self._exit_stack.enter_async_context(client_ctx)
             read_stream, write_stream = streams
-            
+
             session = ClientSession(read_stream, write_stream)
             await self._exit_stack.enter_async_context(session)
             await session.initialize()
-            
-            # List tools from the server
+
             result = await session.list_tools()
-            
+
             for tool_info in result.tools:
                 langchain_tool = self._convert_to_langchain_tool(session, tool_info)
                 self.tools.append(langchain_tool)
-                
+
             self.sessions[name] = session
             logger.info(f"Connected to MCP server: {name} with {len(result.tools)} tools")
-                
+
         except Exception as e:
             logger.error(f"Failed to connect to MCP server {name}: {e}")
 
     def _convert_to_langchain_tool(self, session: ClientSession, tool_info: Any) -> BaseTool:
         """Convert an MCP tool definition to a LangChain BaseTool with proper schema."""
-        import asyncio
-        
+
+        persistent_loop = self._loop
+
         async def tool_func_async(**kwargs):
             result = await session.call_tool(tool_info.name, kwargs)
-            # Handle list of content parts from MCP
             return "\n".join([str(c.text) if hasattr(c, 'text') else str(c) for c in result.content])
 
         def tool_func_sync(**kwargs):
             try:
-                # Try to get existing loop or create new one
-                try:
-                    loop = asyncio.get_event_loop()
-                    if loop.is_running():
-                        # We are in an async world already, this is tricky
-                        # But for now, we'll use a wrapper if needed
-                        import nest_asyncio
-                        nest_asyncio.apply()
-                        return loop.run_until_complete(tool_func_async(**kwargs))
-                    else:
-                        return loop.run_until_complete(tool_func_async(**kwargs))
-                except RuntimeError:
-                    return asyncio.run(tool_func_async(**kwargs))
+                if persistent_loop is None or persistent_loop.is_closed():
+                    return "MCP tool error: background event loop is not running"
+                future = asyncio.run_coroutine_threadsafe(
+                    tool_func_async(**kwargs), persistent_loop
+                )
+                return future.result(timeout=120)
             except Exception as e:
                 return f"MCP tool error: {str(e)}"
 
-        # Check if tool has input schema with multiple properties
         input_schema = getattr(tool_info, 'inputSchema', None)
-        
+
         if input_schema and isinstance(input_schema, dict):
             properties = input_schema.get('properties', {})
             required = input_schema.get('required', [])
-            
+
             if properties:
-                # Build Pydantic model dynamically for StructuredTool
                 field_definitions = {}
                 for prop_name, prop_info in properties.items():
                     prop_type = prop_info.get('type', 'string')
                     prop_desc = prop_info.get('description', '')
-                    
-                    # Map JSON schema types to Python types
+
                     type_mapping = {
                         'string': str,
                         'integer': int,
@@ -150,37 +172,30 @@ class MCPManager:
                         'object': dict,
                     }
                     python_type = type_mapping.get(prop_type, str)
-                    
-                    # Special handling for array types: ensure items schema is properly specified
+
                     if prop_type == 'array':
                         items_schema = prop_info.get('items')
                         if items_schema is None or not isinstance(items_schema, dict):
-                            # If items is missing or invalid, default to list of dicts
-                            # This ensures Gemini gets a valid schema
                             prop_info['items'] = {'type': 'object'}
                             logger.warning(f"Array parameter '{prop_name}' missing 'items' schema, defaulting to 'object'")
                         elif 'type' not in items_schema:
-                            # If items exists but lacks 'type', add it
                             items_schema['type'] = 'object'
                             logger.warning(f"Array parameter '{prop_name}' items missing 'type', defaulting to 'object'")
-                    
-                    # Use Optional for non-required fields
+
                     if prop_name in required:
                         field_definitions[prop_name] = (python_type, Field(description=prop_desc))
                     else:
                         field_definitions[prop_name] = (Optional[python_type], Field(default=None, description=prop_desc))
-                
-                # Create dynamic Pydantic model for args schema
+
                 ArgsModel = create_model(f'{tool_info.name}Args', **field_definitions)
-                
+
                 return StructuredTool.from_function(
                     func=tool_func_sync,
                     name=tool_info.name,
                     description=tool_info.description or f"MCP tool: {tool_info.name}",
                     args_schema=ArgsModel,
                 )
-        
-        # Fallback to simple Tool for tools without complex schema
+
         return Tool(
             name=tool_info.name,
             description=tool_info.description or f"MCP tool: {tool_info.name}",
@@ -191,8 +206,8 @@ class MCPManager:
         """Return the list of discovered MCP tools."""
         return self.tools
 
-    async def close(self):
-        """Close all MCP server connections."""
+    async def _close(self):
+        """Async close: tear down sessions and exit stack."""
         try:
             await self._exit_stack.aclose()
             self.sessions.clear()
@@ -200,3 +215,20 @@ class MCPManager:
             logger.info("MCP Manager closed all connections")
         except Exception as e:
             logger.error(f"Error closing MCP Manager: {e}")
+
+    def close(self):
+        """Close all MCP server connections and stop the background loop."""
+        if self._loop and not self._loop.is_closed():
+            try:
+                future = asyncio.run_coroutine_threadsafe(self._close(), self._loop)
+                future.result(timeout=10)
+            except Exception as e:
+                logger.error(f"Error during MCP Manager close: {e}")
+            finally:
+                self._loop.call_soon_threadsafe(self._loop.stop)
+                if self._thread and self._thread.is_alive():
+                    self._thread.join(timeout=5)
+
+    async def aclose(self):
+        """Async-compatible close (delegates to sync close for cleanup)."""
+        self.close()

@@ -2,6 +2,7 @@ import React, { useEffect, useState, useRef, useCallback } from 'react'
 import Sidebar from './components/Sidebar'
 import Chat from './components/Chat'
 import Dataset from './components/Dataset'
+import Models from './components/Models'
 
 export default function App() {
     const [wsUrl, setWsUrl] = useState(null)
@@ -200,6 +201,9 @@ export default function App() {
                 </div>
                 <div style={{ display: activePage === 'dataset' ? 'block' : 'none', height: '100%' }}>
                     <Dataset />
+                </div>
+                <div style={{ display: activePage === 'models' ? 'block' : 'none', height: '100%', overflow: 'auto' }}>
+                    <Models />
                 </div>
             </main>
         </div>

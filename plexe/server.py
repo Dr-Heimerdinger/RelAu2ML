@@ -21,7 +21,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from plexe.langgraph import PlexeOrchestrator, AgentConfig
 from plexe.langgraph.utils import WebSocketEmitter, MultiEmitter, ConsoleEmitter
 from plexe.langgraph.utils.logging_utils import setup_session_logging, session_id_var
-from plexe.api import datasets_router
+from plexe.api import datasets_router, models_router
 
 logger = logging.getLogger(__name__)
 
@@ -39,6 +39,7 @@ app.add_middleware(
 )
 
 app.include_router(datasets_router)
+app.include_router(models_router)
 
 ui_dir = Path(__file__).parent / "ui"
 frontend_dist = ui_dir / "frontend" / "dist"

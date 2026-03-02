@@ -330,13 +330,20 @@ class PlexeOrchestrator:
         return "error"
     
     def _route_from_training(self, state: PipelineState) -> Literal["success", "error"]:
-        """Route from training node."""
+        """Route from GNN training node to operation.
+
+        The GNN Specialist generates a training script and sets
+        ``training_script_ready``.  Actual training execution is handled
+        by the Operation Agent downstream.
+        """
         if state.get("errors"):
             return "error"
-        if state.get("training_result"):
+        if state.get("training_script_ready"):
             return "success"
         working_dir = state.get("working_dir", "")
-        if os.path.exists(os.path.join(working_dir, "training_results.json")):
+        if os.path.exists(os.path.join(working_dir, "train_script.py")):
+            return "success"
+        if state.get("training_result"):
             return "success"
         return "error"
     
