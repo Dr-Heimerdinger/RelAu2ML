@@ -472,11 +472,20 @@ function ConfirmationDialog({ request, onConfirm, onReject }) {
 export default function Chat({ messages, status, isProcessing, onSendMessage, onStopProcessing, confirmationRequest, onConfirmationResponse }) {
     const [input, setInput] = useState('')
     const messagesEndRef = useRef(null)
+    const textareaRef = useRef(null)
 
     // Auto-scroll to bottom when new messages arrive
     useEffect(() => {
         messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' })
     }, [messages, isProcessing])
+
+    // Auto-resize textarea to fit content
+    useEffect(() => {
+        const el = textareaRef.current
+        if (!el) return
+        el.style.height = 'auto'
+        el.style.height = Math.min(el.scrollHeight, 160) + 'px'
+    }, [input])
 
     const send = () => {
         if (onSendMessage(input)) {
@@ -522,24 +531,33 @@ export default function Chat({ messages, status, isProcessing, onSendMessage, on
                 <div ref={messagesEndRef} />
             </div>
             <div className="composer">
-                <input
+                <textarea
+                    ref={textareaRef}
                     value={input}
                     onChange={(e) => setInput(e.target.value)}
-                    onKeyPress={(e) => {
-                        if (e.key === 'Enter') {
+                    onKeyDown={(e) => {
+                        if (e.key === 'Enter' && !e.shiftKey) {
+                            e.preventDefault()
                             send()
                         }
                     }}
-                    placeholder="Type your message..."
+                    placeholder="Type your message... (Shift+Enter for new line)"
                     disabled={isProcessing || status !== 'connected'}
+                    rows={1}
                 />
                 {isProcessing ? (
                     <button onClick={onStopProcessing} className="stop-btn">
+                        <svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor">
+                            <rect x="4" y="4" width="16" height="16" rx="2" />
+                        </svg>
                         Stop
                     </button>
                 ) : (
-                    <button onClick={send} disabled={status !== 'connected'}>
-                        Send
+                    <button onClick={send} disabled={status !== 'connected'} className="send-btn">
+                        <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                            <line x1="22" y1="2" x2="11" y2="13" />
+                            <polygon points="22 2 15 22 11 13 2 9 22 2" />
+                        </svg>
                     </button>
                 )}
             </div>

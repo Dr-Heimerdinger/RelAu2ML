@@ -126,11 +126,72 @@ def _parse_task_file(task_path: Path) -> dict:
     return meta
 
 
+def _parse_dataset_file(dataset_path: Path) -> dict:
+    """Parse dataset.py to extract table relationships, primary keys, and time columns."""
+    import re
+
+    if not dataset_path.exists():
+        return {}
+
+    content = dataset_path.read_text()
+    table_info = {}
+
+    # Find each tables["name"] = Table(...) block using balanced parentheses
+    pattern = re.compile(r'tables\s*\[\s*["\'](\w+)["\']\s*\]\s*=\s*Table\s*\(')
+
+    for m in pattern.finditer(content):
+        table_name = m.group(1)
+        # Find the balanced closing paren by counting parens
+        start = m.end() - 1  # position of the opening (
+        depth = 0
+        end = start
+        for i in range(start, len(content)):
+            if content[i] == '(':
+                depth += 1
+            elif content[i] == ')':
+                depth -= 1
+                if depth == 0:
+                    end = i
+                    break
+        block = content[start:end + 1]
+        info = {}
+
+        # Extract fkey_col_to_pkey_table dict
+        fkey_match = re.search(
+            r'fkey_col_to_pkey_table\s*=\s*\{([^}]*)\}', block, re.DOTALL
+        )
+        if fkey_match:
+            fkeys = {}
+            for fk in re.finditer(
+                r'["\'](\w+)["\']\s*:\s*["\'](\w+)["\']', fkey_match.group(1)
+            ):
+                fkeys[fk.group(1)] = fk.group(2)
+            info["foreign_keys"] = fkeys
+
+        # Extract pkey_col
+        pk_match = re.search(r'pkey_col\s*=\s*["\'](\w+)["\']', block)
+        if pk_match:
+            info["primary_key"] = pk_match.group(1)
+
+        # Extract time_col
+        tc_match = re.search(r'time_col\s*=\s*["\'](\w+)["\']', block)
+        if tc_match:
+            info["time_col"] = tc_match.group(1)
+
+        table_info[table_name] = info
+
+    return table_info
+
+
 def _get_input_schema(folder: Path) -> dict:
     task_meta = {}
     task_path = folder / "task.py"
     if task_path.exists():
         task_meta = _parse_task_file(task_path)
+
+    # Parse dataset.py for relationships
+    dataset_path = folder / "dataset.py"
+    dataset_info = _parse_dataset_file(dataset_path)
 
     csv_dir = folder / "csv_files"
     tables = {}
@@ -138,14 +199,45 @@ def _get_input_schema(folder: Path) -> dict:
         for csv_file in csv_dir.iterdir():
             if csv_file.suffix == ".csv":
                 try:
-                    df = pd.read_csv(csv_file, nrows=3)
-                    tables[csv_file.stem] = {
-                        "columns": list(df.columns),
-                        "dtypes": {col: str(dtype) for col, dtype in df.dtypes.items()},
-                        "sample_rows": df.head(3).to_dict(orient="records"),
+                    df_sample = pd.read_csv(csv_file, nrows=3)
+                    # Count total rows efficiently
+                    row_count = sum(1 for _ in open(csv_file)) - 1  # minus header
+                    table_name = csv_file.stem
+                    ds_meta = dataset_info.get(table_name, {})
+                    # Convert to records with NaN/inf → None for JSON safety
+                    import math
+                    raw_rows = df_sample.head(3).to_dict(orient="records")
+                    safe_rows = []
+                    for row in raw_rows:
+                        safe_row = {}
+                        for k, v in row.items():
+                            if isinstance(v, float) and (math.isnan(v) or math.isinf(v)):
+                                safe_row[k] = None
+                            else:
+                                safe_row[k] = v
+                        safe_rows.append(safe_row)
+                    tables[table_name] = {
+                        "columns": list(df_sample.columns),
+                        "dtypes": {
+                            col: str(dtype)
+                            for col, dtype in df_sample.dtypes.items()
+                        },
+                        "sample_rows": safe_rows,
+                        "row_count": row_count,
+                        "primary_key": ds_meta.get("primary_key"),
+                        "time_col": ds_meta.get("time_col"),
+                        "foreign_keys": ds_meta.get("foreign_keys", {}),
                     }
                 except Exception:
-                    tables[csv_file.stem] = {"columns": [], "dtypes": {}, "sample_rows": []}
+                    tables[csv_file.stem] = {
+                        "columns": [],
+                        "dtypes": {},
+                        "sample_rows": [],
+                        "row_count": 0,
+                        "primary_key": None,
+                        "time_col": None,
+                        "foreign_keys": {},
+                    }
 
     entity_table = task_meta.get("entity_table", "")
     entity_col = task_meta.get("entity_col", "")
@@ -155,6 +247,7 @@ def _get_input_schema(folder: Path) -> dict:
         "tables": tables,
         "entity_table": entity_table,
         "entity_col": entity_col,
+        "relationships": dataset_info,
         "description": (
             f"This model predicts on the '{entity_table}' table using entity column "
             f"'{entity_col}'. Provide a timestamp and optionally a list of entity IDs "
@@ -218,9 +311,84 @@ async def get_model_schema(model_id: str):
     return _get_input_schema(folder)
 
 
+class ValidateDBRequest(BaseModel):
+    connection_string: str
+
+
+@router.post("/{model_id}/validate-db")
+async def validate_database(model_id: str, req: ValidateDBRequest):
+    """Validate if a user's database has the required tables and columns for inference."""
+    folder = WORKDIR / model_id
+    if not folder.exists() or not (folder / "best_model.pt").exists():
+        raise HTTPException(status_code=404, detail=f"Model '{model_id}' not found")
+
+    schema = _get_input_schema(folder)
+    required_tables = schema.get("tables", {})
+
+    if not required_tables:
+        raise HTTPException(
+            status_code=400, detail="Model has no schema information available"
+        )
+
+    try:
+        from sqlalchemy import create_engine, inspect
+
+        engine = create_engine(req.connection_string)
+        inspector = inspect(engine)
+        db_tables = inspector.get_table_names()
+
+        results = {}
+        all_ok = True
+
+        for table_name, table_info in required_tables.items():
+            required_cols = set(table_info.get("columns", []))
+            if table_name in db_tables:
+                db_columns = {col["name"] for col in inspector.get_columns(table_name)}
+                missing_cols = required_cols - db_columns
+                extra_cols = db_columns - required_cols
+                results[table_name] = {
+                    "found": True,
+                    "required_columns": sorted(required_cols),
+                    "db_columns": sorted(db_columns),
+                    "missing_columns": sorted(missing_cols),
+                    "extra_columns": sorted(extra_cols),
+                    "compatible": len(missing_cols) == 0,
+                }
+                if missing_cols:
+                    all_ok = False
+            else:
+                results[table_name] = {
+                    "found": False,
+                    "required_columns": sorted(required_cols),
+                    "db_columns": [],
+                    "missing_columns": sorted(required_cols),
+                    "extra_columns": [],
+                    "compatible": False,
+                }
+                all_ok = False
+
+        engine.dispose()  # Clean up connection
+
+        return {
+            "compatible": all_ok,
+            "tables": results,
+            "total_required": len(required_tables),
+            "total_found": sum(1 for t in results.values() if t["found"]),
+        }
+
+    except ImportError:
+        raise HTTPException(
+            status_code=500, detail="sqlalchemy is required for DB validation"
+        )
+    except Exception as e:
+        raise HTTPException(
+            status_code=400, detail=f"Database connection failed: {str(e)}"
+        )
+
+
 @router.post("/{model_id}/infer")
 async def run_inference(model_id: str, file: UploadFile = File(...)):
-    folder = WORKDIR / model_id
+    folder = (WORKDIR / model_id).resolve()
     if not folder.exists() or not (folder / "best_model.pt").exists():
         raise HTTPException(status_code=404, detail=f"Model '{model_id}' not found")
 
@@ -347,6 +515,12 @@ import json
 import numpy as np
 import pandas as pd
 import torch
+
+try:
+    import numpy.core.multiarray
+    torch.serialization.add_safe_globals([numpy.core.multiarray.scalar])
+except Exception:
+    pass
 
 sys.path.insert(0, "{folder}")
 
@@ -479,10 +653,14 @@ all_timestamps = []
 for ts in unique_timestamps:
     ts_mask = timestamps == ts
     ts_entities = entity_ids[ts_mask].values
-    ts_series = pd.Series([ts] * len(ts_entities))
+    ts_series = pd.to_datetime(pd.Series([ts] * len(ts_entities)))
 
     infer_table = task.make_table(db, ts_series)
     infer_df = infer_table.df
+
+    if infer_df.empty:
+        print(f"Warning: No entities found for timestamp {{ts}}, skipping")
+        continue
 
     target_col = "{task_meta.get('target_col', 'target')}"
     if target_col in infer_df.columns:
@@ -520,23 +698,36 @@ for ts in unique_timestamps:
             pred = pred.view(-1) if pred.size(1) == 1 else pred
             pred_list.append(pred.detach().cpu())
 
+    if not pred_list:
+        n_nodes = len(table_input.nodes[1])
+        print(f"Warning: NeighborLoader yielded 0 batches for timestamp {{ts}} "
+              f"(infer_df rows: {{len(infer_df)}}, input nodes: {{n_nodes}}). Skipping.")
+        continue
     preds = torch.cat(pred_list, dim=0).numpy()
+
+    # Build predictions for ALL entities returned by make_table
+    infer_entity_ids = infer_df["{entity_col}"].values[:len(preds)]
 
     task_type = "{task_type}"
     if task_type == "binary_classification":
         proba = 1.0 / (1.0 + np.exp(-preds))
         labels = (proba >= 0.5).astype(int)
-        for i, eid in enumerate(infer_df["{entity_col}"].values[:len(preds)]):
-            all_preds.append({{"entity_id": eid, "timestamp": str(ts), "probability": float(proba[i]), "prediction": int(labels[i])}})
+        for i, eid in enumerate(infer_entity_ids):
+            all_preds.append({{"entity_id": eid, "timestamp": str(ts), "{task_meta.get('target_col', 'target')}_probability": float(proba[i]), "prediction": int(labels[i])}})
     elif task_type == "multiclass_classification":
         class_preds = np.argmax(preds, axis=1) if preds.ndim > 1 else preds
-        for i, eid in enumerate(infer_df["{entity_col}"].values[:len(preds)]):
+        for i, eid in enumerate(infer_entity_ids):
             all_preds.append({{"entity_id": eid, "timestamp": str(ts), "prediction": int(class_preds[i])}})
     else:
-        for i, eid in enumerate(infer_df["{entity_col}"].values[:len(preds)]):
+        for i, eid in enumerate(infer_entity_ids):
             all_preds.append({{"entity_id": eid, "timestamp": str(ts), "prediction": float(preds[i])}})
 
 result_df = pd.DataFrame(all_preds)
+
+# Filter to only the entity IDs requested in the input CSV
+requested_ids = set(input_df["{entity_col}"].dropna().astype(float).values)
+result_df = result_df[result_df["entity_id"].isin(requested_ids)].reset_index(drop=True)
+
 result_df.to_csv("{output_csv}", index=False)
-print(f"Inference complete: {{len(result_df)}} predictions saved")
+print(f"Inference complete: {{len(result_df)}} predictions saved (filtered from {{len(all_preds)}} total)")
 '''

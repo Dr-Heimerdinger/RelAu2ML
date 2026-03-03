@@ -3,7 +3,7 @@
  * Handles all HTTP requests to the backend
  */
 
-const API_BASE_URL = import.meta.env.VITE_BACKEND_URL || 'http://localhost:8000'
+const API_BASE_URL = import.meta.env.VITE_BACKEND_URL || ''
 
 /**
  * Upload file(s) to the backend
@@ -245,6 +245,25 @@ export async function runInference(modelId, file) {
     if (!response.ok) {
         const errorData = await response.json().catch(() => ({}))
         throw new Error(errorData.detail || 'Inference failed')
+    }
+    return await response.json()
+}
+
+/**
+ * Validate a database connection against a model's required schema
+ * @param {string} modelId - Model ID
+ * @param {string} connectionString - Database connection string
+ * @returns {Promise<Object>} Validation results
+ */
+export async function validateDatabase(modelId, connectionString) {
+    const response = await fetch(`${API_BASE_URL}/api/models/${encodeURIComponent(modelId)}/validate-db`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ connection_string: connectionString }),
+    })
+    if (!response.ok) {
+        const errorData = await response.json().catch(() => ({}))
+        throw new Error(errorData.detail || 'Database validation failed')
     }
     return await response.json()
 }

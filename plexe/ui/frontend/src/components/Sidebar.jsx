@@ -4,8 +4,15 @@ export default function Sidebar({ activePage, setActivePage }) {
     return (
         <aside className="sidebar">
             <div className="sidebar-header">
-                <h2>Plexe</h2>
-                <p>Assistant</p>
+                <div className="sidebar-logo">
+                    <svg width="28" height="28" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.75">
+                        <path d="M12 2L2 7l10 5 10-5-10-5z" />
+                        <path d="M2 17l10 5 10-5" />
+                        <path d="M2 12l10 5 10-5" />
+                    </svg>
+                    <h2>Plexe</h2>
+                </div>
+                <p>AI Model Builder</p>
             </div>
 
             <nav className="sidebar-nav">
@@ -49,10 +56,6 @@ export default function Sidebar({ activePage, setActivePage }) {
                     <span className="label">Models</span>
                 </button>
             </nav>
-
-            <div className="sidebar-footer">
-                <p className="version">v0.26.2</p>
-            </div>
         </aside>
     )
 }

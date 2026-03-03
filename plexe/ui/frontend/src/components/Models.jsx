@@ -10,7 +10,7 @@ function formatBytes(bytes) {
 
 function formatMetric(value) {
     if (typeof value !== 'number') return '-'
-    return value.toFixed(4)
+    return value.toFixed(2)
 }
 
 function TaskTypeBadge({ type }) {
@@ -138,17 +138,33 @@ function ModelCard({ model, onDelete, onRename, onInfer }) {
             )}
 
             <div className="model-card-actions">
-                <button className="model-btn model-btn-primary" onClick={() => onInfer(model)}>
+                <button className="model-btn model-btn-infer" onClick={() => onInfer(model)}>
+                    <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                        <polygon points="13 2 3 14 12 14 11 22 21 10 12 10 13 2" />
+                    </svg>
                     Infer
                 </button>
-                <button className="model-btn model-btn-secondary" onClick={() => { setNewName(model.name); setIsRenaming(true) }}>
-                    Rename
+                <button className="model-btn model-btn-icon" onClick={() => { setNewName(model.name); setIsRenaming(true) }} title="Rename">
+                    <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                        <path d="M11 4H4a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7" />
+                        <path d="M18.5 2.5a2.121 2.121 0 0 1 3 3L12 15l-4 1 1-4 9.5-9.5z" />
+                    </svg>
                 </button>
                 <button
-                    className={`model-btn ${confirmDelete ? 'model-btn-danger-confirm' : 'model-btn-danger'}`}
+                    className={`model-btn ${confirmDelete ? 'model-btn-icon-danger-confirm' : 'model-btn-icon-danger'}`}
                     onClick={handleDelete}
+                    title={confirmDelete ? 'Click again to confirm' : 'Delete'}
                 >
-                    {confirmDelete ? 'Confirm?' : 'Delete'}
+                    {confirmDelete ? (
+                        <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
+                            <polyline points="20 6 9 17 4 12" />
+                        </svg>
+                    ) : (
+                        <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                            <polyline points="3 6 5 6 21 6" />
+                            <path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2" />
+                        </svg>
+                    )}
                 </button>
             </div>
         </div>
