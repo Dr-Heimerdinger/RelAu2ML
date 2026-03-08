@@ -22,6 +22,22 @@ class PipelinePhase(str, Enum):
     FAILED = "failed"
 
 
+class ErrorCategory(str, Enum):
+    TRANSIENT = "transient"
+    PERMANENT = "permanent"
+    RECOVERABLE = "recoverable"
+
+
+class ErrorRecord(TypedDict, total=False):
+    agent: str
+    phase: str
+    category: str
+    message: str
+    exception_type: str
+    timestamp: str
+    retry_attempt: int
+
+
 class MessageRole(str, Enum):
     """Message roles in conversation."""
     USER = "user"
@@ -112,14 +128,17 @@ class PipelineState(TypedDict, total=False):
     
     generated_code: Dict[str, str]
     artifacts: List[str]
-    
-    errors: Annotated[List[str], operator.add]
+
+    active_errors: List[str]
+    error_records: List[ErrorRecord]
+    error_history: Annotated[List[str], operator.add]
     warnings: Annotated[List[str], operator.add]
-    
+    failed_phase: Optional[str]
+
     user_confirmation_required: bool
     user_confirmation_context: Optional[Dict[str, Any]]
     user_confirmed: Optional[bool]
-    
+
     metadata: Dict[str, Any]
 
 
@@ -162,8 +181,11 @@ def create_initial_state(
         training_result=None,
         generated_code={},
         artifacts=[],
-        errors=[],
+        active_errors=[],
+        error_records=[],
+        error_history=[],
         warnings=[],
+        failed_phase=None,
         user_confirmation_required=False,
         user_confirmation_context=None,
         user_confirmed=None,

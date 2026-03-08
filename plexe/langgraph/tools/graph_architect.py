@@ -173,4 +173,4 @@ def extract_schema_metadata(db_connection_string: str) -> Dict[str, Any]:
             "temporal_columns": temporal_columns
         }
     except Exception as e:
-        return {"error": str(e)}
+        return {"status": "error", "error": str(e)}

@@ -72,8 +72,8 @@ class OperationAgent(BaseAgent):
             hp = state["selected_hyperparameters"]
             context_parts.append(f"Selected hyperparameters: {hp}")
         
-        if state.get("errors"):
-            context_parts.append(f"Previous errors: {state['errors']}")
+        if state.get("error_history"):
+            context_parts.append(f"Previous errors: {state['error_history']}")
         
         # Instructions based on state
         if not state.get("training_result"):
@@ -125,7 +125,7 @@ FINALIZE PIPELINE:
                 logger.info(f"Training results processed: {training_results}")
             except Exception as e:
                 logger.warning(f"Could not read training results: {e}")
-                base_result["errors"] = base_result.get("errors", []) + [f"Failed to read training results: {e}"]
+                base_result["active_errors"] = [f"Failed to read training results: {e}"]
         
         # Mark pipeline as completed
         base_result["current_phase"] = PipelinePhase.COMPLETED.value

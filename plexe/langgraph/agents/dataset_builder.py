@@ -25,8 +25,6 @@ from plexe.langgraph.prompts.dataset_builder import DATASET_BUILDER_SYSTEM_PROMP
 
 logger = logging.getLogger(__name__)
 
-# Maximum retry attempts for incomplete tasks
-MAX_AGENT_RETRIES = 2
 
 class DatasetBuilderAgent(BaseAgent):
     """Agent for building RelBench Dataset classes from CSV data."""
@@ -65,10 +63,11 @@ class DatasetBuilderAgent(BaseAgent):
         """
         working_dir = state.get("working_dir", "")
         dataset_path = os.path.join(working_dir, "dataset.py") if working_dir else ""
-        
-        for attempt in range(MAX_AGENT_RETRIES + 1):
+        max_retries = self.config.retry_config.get("dataset_building", 2)
+
+        for attempt in range(max_retries + 1):
             if attempt > 0:
-                logger.warning(f"DatasetBuilderAgent retry attempt {attempt}/{MAX_AGENT_RETRIES}")
+                logger.warning(f"DatasetBuilderAgent retry attempt {attempt}/{max_retries}")
                 if self.emitter:
                     self.emitter.emit_thought(
                         self.name, 
@@ -83,8 +82,7 @@ class DatasetBuilderAgent(BaseAgent):
                 logger.info(f"DatasetBuilderAgent successfully created {dataset_path}")
                 return result
             
-            # If this is not the last attempt, prepare for retry
-            if attempt < MAX_AGENT_RETRIES:
+            if attempt < max_retries:
                 # Add a follow-up message to force completion
                 retry_message = self._build_retry_message(working_dir, state.get("csv_dir", ""))
                 
@@ -284,11 +282,8 @@ You stopped before calling register_dataset_code() OR the file was not created.
         else:
             error_msg = f"CRITICAL ERROR: Dataset file not found at {dataset_path}. DatasetBuilderAgent did not complete its task. The agent must call register_dataset_code() to generate dataset.py."
             logger.error(error_msg)
-            # Add to errors list so _route_from_dataset detects failure
-            existing_errors = base_result.get("errors", []) or []
-            existing_errors.append(error_msg)
-            base_result["errors"] = existing_errors
-            base_result["status"] = "error"
+            base_result["active_errors"] = [error_msg]
+            base_result["error_history"] = [error_msg]
             # Set dataset_info with error flag for debugging
             dataset_info["class_name"] = "GenDataset"
             dataset_info["file_path"] = dataset_path

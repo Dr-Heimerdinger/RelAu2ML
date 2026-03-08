@@ -1,0 +1,26 @@
+\section{Kiến Trúc Tổng Quát}
+Kiến trúc của Relau2ML được tổ chức theo mô hình \textit{đồ thị luồng công việc} (workflow graph), bao gồm ba giai đoạn kế tiếp:
+
+\begin{enumerate}
+    \item \textbf{Khởi tạo} (Initialization): Thu thập và xác thực yêu cầu từ người dùng.
+    \item \textbf{Phân tích và Kỹ nghệ Dữ liệu} (Data Planning \& Engineering): Khám phá cấu trúc cơ sở dữ liệu, xây dựng đồ thị không đồng nhất, và định nghĩa tác vụ học máy.
+    \item \textbf{Mô hình hóa và Thực thi} (Modeling \& Execution): Thiết kế kiến trúc mạng nơ-ron đồ thị và điều phối quá trình huấn luyện.
+\end{enumerate}
+
+Để đảm bảo tính nhất quán xuyên suốt quy trình, hệ thống duy trì một \textbf{bộ nhớ trạng thái toàn cục} $\mathcal{S}$ (global state memory) đóng vai trò là không gian lưu trữ chung giữa các tác tử. Bộ nhớ $\mathcal{S}$ bao gồm bốn thành phần:
+
+\begin{itemize}
+    \item \textbf{Lịch sử tương tác} $\mathcal{S}_{hist}$: Chuỗi các yêu cầu và phản hồi ngôn ngữ tự nhiên giữa người dùng và hệ thống.
+    \item \textbf{Tri thức nghiệp vụ} $\mathcal{S}_{schema}$: Đặc tả lược đồ cơ sở dữ liệu, bao gồm các ràng buộc khóa chính, khóa ngoại, và nhãn thời gian.
+    \item \textbf{Đặc tả kỹ thuật} $\mathcal{S}_{spec}$: Định nghĩa bài toán học máy và cấu hình dữ liệu đầu vào.
+    \item \textbf{Trạng thái tiến trình} $\mathcal{S}_{exec}$: Nhật ký lỗi và bộ đếm thử lại tại mỗi bước, phục vụ cơ chế tự phục hồi.
+\end{itemize}
+
+Cơ chế bộ nhớ dùng chung loại bỏ nhu cầu giao tiếp điểm-đến-điểm (point-to-point) giữa các tác tử, từ đó giảm độ phức tạp tích hợp và duy trì tính nhất quán dữ liệu. Hình~\ref{fig:architecture} minh họa luồng điều khiển tổng thể của hệ thống.
+
+\begin{figure}[htbp]
+    \centering
+    % \includegraphics[width=\linewidth]{figures/relau2ml_architecture.pdf}
+    \caption{Kiến trúc tổng quan của Relau2ML. Mỗi tác tử đọc và ghi vào bộ nhớ trạng thái toàn cục $\mathcal{S}$; các mũi tên thể hiện thứ tự kích hoạt trong đồ thị luồng công việc.}
+    \label{fig:architecture}
+\end{figure}

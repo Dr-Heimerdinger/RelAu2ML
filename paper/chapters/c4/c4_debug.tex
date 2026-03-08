@@ -1,0 +1,87 @@
+\section{Cơ chế tự phục hồi đa tầng}
+\label{sec:self-recovery}
+
+Trong các hệ thống đa tác tử (multi-agent) dựa trên mô hình ngôn ngữ lớn (LLM), lỗi là hiện tượng không thể tránh khỏi vì mã nguồn do LLM sinh ra có thể chứa lỗi cú pháp, lỗi ngữ nghĩa, hoặc vi phạm ràng buộc dữ liệu. Các nghiên cứu gần đây như Reflexion~\cite{shinn2023reflexion} và MetaGPT~\cite{hong2023metagpt} đã chỉ ra rằng phản hồi có cấu trúc giúp LLM sửa lỗi hiệu quả hơn đáng kể so với việc chỉ thử lại. Dựa trên những phát hiện này, hệ thống thiết kế cơ chế tự phục hồi đa tầng (\textit{Multi-Level Progressive Self-Recovery}) hoạt động ở hai cấp độ: phục hồi tại tầng tác tử (agent-level) và phục hồi tại tầng điều phối (orchestration-level).
+
+\subsection{Phân loại lỗi tự động}
+
+Khi một nút (node) trong pipeline tạo ra lỗi, hệ thống thực hiện phân loại lỗi tự động dựa trên phân tích từ khóa trên thông điệp lỗi.
+Bảng~\ref{tab:error-taxonomy} mô tả phân loại này.
+
+\begin{table}[htbp]
+\centering
+\caption{Phân loại lỗi tự động trong pipeline.}
+\label{tab:error-taxonomy}
+\begin{tabular}{lll}
+\toprule
+\textbf{Loại lỗi} & \textbf{Từ khóa nhận diện} & \textbf{Mô tả} \\
+\midrule
+\texttt{syntax\_error}  & \textit{syntax, SyntaxError}          & Mã sinh ra không hợp lệ cú pháp \\
+\texttt{runtime\_error}  & (mặc định)                            & Lỗi thực thi runtime \\
+\texttt{data\_error}     & \textit{not found, missing, does not exist} & Thiếu dữ liệu hoặc file \\
+\texttt{llm\_refusal}    & \textit{refuse, cannot assist}        & LLM từ chối thực hiện yêu cầu \\
+\texttt{timeout}         & \textit{timeout, timed out}           & Vượt quá thời gian cho phép \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+Kết quả phân loại được gắn vào trạng thái pipeline dưới dạng các trường có cấu trúc: \texttt{failed\_node} (nút gây lỗi), \texttt{error\_type} (loại lỗi), và \texttt{error\_context} (ngữ cảnh lỗi chi tiết).
+Thông tin này cho phép hệ thống đưa ra quyết định phục hồi có chọn lọc thay vì thử lại mù quáng.
+
+\subsection{Phục hồi tại tầng tác tử}
+
+Mỗi tác tử trong pipeline được trang bị vòng lặp tự kiểm tra.
+Sau mỗi lần thực thi, tác tử kiểm tra xem sản phẩm (artifact) đã được tạo thành công hay chưa. Ví dụ, \texttt{DatasetBuilderAgent} kiểm tra sự tồn tại của file \texttt{dataset.py}, \texttt{TaskBuilderAgent} kiểm tra \texttt{task.py}, \texttt{GNNSpecialistAgent} kiểm tra \texttt{train\_script.py}.
+Nếu sản phẩm chưa được tạo, tác tử tự bổ sung hướng dẫn mạnh hơn vào ngữ cảnh hội thoại và thực hiện lại (ví dụ, \texttt{``CRITICAL: YOU DID NOT COMPLETE YOUR TASK!''}), tối đa $K$ lần (với $K = 2$ cho các tác tử sinh mã và $K = 1$ cho \texttt{OperationAgent} do chi phí GPU).
+
+Ngoài ra, các công cụ đăng ký mã (\texttt{register\_dataset\_code}, \texttt{register\_task\_code}) thực hiện kiểm tra xác thực trước khi ghi file, bao gồm:
+
+\begin{enumerate}
+    \item \textbf{Kiểm tra cú pháp}: phân tích cú pháp bằng \texttt{ast.parse()} - mã có lỗi cú pháp bị từ chối ngay lập tức thay vì được ghi vào file.
+    \item \textbf{Kiểm tra lớp bắt buộc}: xác minh sự tồn tại của class cần thiết (ví dụ: \texttt{GenDataset}, \texttt{GenTask}).
+    \item \textbf{Kiểm tra import}: phát hiện các thư viện được sử dụng nhưng chưa được import (pandas, duckdb, numpy, torch).
+\end{enumerate}
+
+\subsection{Phục hồi tại tầng điều phối}
+
+Khi phục hồi tại tầng tác tử không thành công (tất cả $K$ lần thử trong agent đều thất bại), lỗi được chuyển lên tầng điều phối (orchestrator-level). Tại đây, nút \texttt{error\_handler} trong StateGraph thực hiện cơ chế leo thang tuần tự qua ba cấp, được mô tả trong Bảng~\ref{tab:escalation-levels}.
+
+\begin{table}
+\centering
+\caption{Ba cấp leo thang trong cơ chế phục hồi tại tầng điều phối.}
+\label{tab:escalation-levels}
+\begin{tabular}{clp{7.5cm}}
+\toprule
+\textbf{Cấp} & \textbf{Hành động} & \textbf{Mô tả} \\
+\midrule
+1 & Thử lại cùng nút & Gửi phản hồi lỗi có cấu trúc cho tác tử bị lỗi và thử lại ngay tại nút đó. \\
+2 & Quay lại nút trước & Quay lại nút liền trước trong pipeline (ví dụ: từ \texttt{task\_building} về \texttt{dataset\_building}) để sửa nguyên nhân gốc. \\
+3 & Khởi động lại từ đầu & Quay về nút \texttt{conversation} để thu thập yêu cầu lại từ người dùng. \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+Trước mỗi lần thử lại, nút \texttt{error\_handler} thực hiện:
+
+\begin{itemize}
+    \item \textbf{Xóa lỗi tích lũy}: Sử dụng cơ chế \texttt{Overwrite} của LangGraph để thay thế danh sách lỗi cũ bằng danh sách rỗng, tránh tình trạng lỗi cũ gây kẹt routing vĩnh viễn.
+    \item \textbf{Xóa thông tin cũ}: Xóa các trường trạng thái không còn hợp lệ (ví dụ: \texttt{dataset\_info}, \texttt{task\_info}) tương ứng với nút bị lỗi.
+    \item \textbf{Tiêm phản hồi lỗi}: Thêm thông điệp hệ thống (system message) với phản hồi lỗi có cấu trúc vào lịch sử hội thoại, giúp tác tử nhận biết lỗi cũ và cách khắc phục.
+\end{itemize}
+
+Quá trình leo thang dừng lại khi số lần thử tại tầng điều phối vượt ngưỡng tối đa (\texttt{max\_retries}, mặc định là 3), lúc đó pipeline chuyển sang trạng thái \texttt{FAILED}.
+
+\subsection{Phản hồi có cấu trúc}
+
+Một trong những yếu tố quan trọng nhất ảnh hưởng đến hiệu quả phục hồi là chất lượng phản hồi mà tác tử nhận được khi thử lại~\cite{shinn2023reflexion}.
+Thay vì chỉ gửi thông báo ``có lỗi, hãy thử lại'', hệ thống cung cấp ngữ cảnh lỗi có cấu trúc bao gồm:
+
+\begin{itemize}
+    \item Số thứ tự lần thử hiện tại và tổng số lần thử tối đa
+    \item Tên nút pipeline gây lỗi
+    \item Phân loại lỗi (từ Bảng~\ref{tab:error-taxonomy})
+    \item Thông điệp lỗi gốc (traceback hoặc mô tả)
+    \item Hướng dẫn khắc phục cụ thể
+\end{itemize}
+
+Ngữ cảnh này được thêm vào cả lịch sử hội thoại và phần context riêng của tác tử, đảm bảo rằng LLM có đầy đủ thông tin để sửa lỗi mà không cần phân tích lại từ đầu.

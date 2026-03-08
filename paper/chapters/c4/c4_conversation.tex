@@ -1,0 +1,19 @@
+% =========================================================
+\section{Giai Đoạn Khởi Tạo}
+% =========================================================
+
+Giai đoạn Khởi tạo chịu trách nhiệm thu thập thông tin đầu vào và xác thực yêu cầu của người dùng trước khi hệ thống chuyển sang các bước xử lý kỹ thuật tiếp theo.
+
+\subsection{Tác Tử Giao Tiếp ($\mathcal{A}_{conv}$, Conversational Agent)}
+
+Tác tử Giao tiếp $\mathcal{A}_{conv}$ là giao diện tương tác duy nhất giữa người dùng và hệ thống. Nhiệm vụ của tác tử là phân tích câu lệnh ngôn ngữ tự nhiên nhằm trích xuất ý định cốt lõi cùng các tham số kết nối dữ liệu cần thiết.
+
+\paragraph{Cơ chế hoạt động.}
+Quá trình tương tác được thực hiện thông qua một vòng lặp kiểm tra thông tin (information-gathering loop), được mô tả như sau:
+
+\begin{enumerate}
+    \item $\mathcal{A}_{conv}$ tiếp nhận yêu cầu từ người dùng và đối chiếu với tập các trường thông tin bắt buộc $\mathcal{F} = \{f_1, f_2, \ldots, f_k\}$, bao gồm đường dẫn dữ liệu và mục tiêu dự đoán.
+    \item Với mỗi trường $f_i \in \mathcal{F}$ còn thiếu, tác tử sinh câu hỏi làm rõ tương ứng và gửi lại người dùng.
+    \item Vòng lặp kết thúc khi toàn bộ $\mathcal{F}$ được điền đầy đủ và người dùng xác nhận thông tin.
+    \item Kết quả được ghi vào $\mathcal{S}_{hist}$ và $\mathcal{S}_{spec}$ để các giai đoạn sau truy xuất.
+\end{enumerate}

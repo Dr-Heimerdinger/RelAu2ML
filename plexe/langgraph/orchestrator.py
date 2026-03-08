@@ -169,7 +169,12 @@ class PlexeOrchestrator:
             "error_handler",
             self._route_from_error,
             {
-                "retry": "conversation",
+                "conversation": "conversation",
+                "schema_analysis": "schema_analysis",
+                "dataset_building": "dataset_building",
+                "task_building": "task_building",
+                "gnn_training": "gnn_training",
+                "operation": "operation",
                 "end": END,
             }
         )
@@ -216,25 +221,31 @@ class PlexeOrchestrator:
     
     def _error_handler_node(self, state: PipelineState) -> Dict[str, Any]:
         """Handle errors and determine recovery strategy."""
-        errors = state.get("errors", [])
-        logger.error(f"Pipeline error: {errors}")
-        
+        active_errors = state.get("active_errors", [])
+        failed_phase = state.get("current_phase", "conversation")
+        logger.error(f"Pipeline error in {failed_phase}: {active_errors}")
+
         if self.emitter:
-            self.emitter.emit_thought("ErrorHandler", f"Handling errors: {errors}")
-        
-        # Safely get retry_count - handle None case explicitly
+            self.emitter.emit_thought("ErrorHandler", f"Handling errors in {failed_phase}: {active_errors}")
+
         metadata = state.get("metadata") or {}
         retry_count = metadata.get("retry_count", 0)
-        max_retries = self.config.max_retries
-        
-        if retry_count < max_retries:
+        phase_max = self.config.retry_config.get(failed_phase, self.config.max_retries)
+
+        if retry_count < phase_max:
             return {
+                "active_errors": [],
+                "error_records": [],
+                "error_history": [f"[retry {retry_count + 1}/{phase_max}] {e}" for e in active_errors],
+                "failed_phase": failed_phase,
                 "metadata": {**metadata, "retry_count": retry_count + 1},
-                "warnings": [f"Retrying after error (attempt {retry_count + 1}/{max_retries})"],
+                "warnings": [f"Retrying {failed_phase} after error (attempt {retry_count + 1}/{phase_max})"],
             }
-        
+
         return {
             "current_phase": PipelinePhase.FAILED.value,
+            "error_history": [f"[FAILED] {e}" for e in active_errors],
+            "failed_phase": failed_phase,
         }
     
     def _route_from_conversation(self, state: PipelineState) -> Literal["continue", "proceed", "end"]:
@@ -277,7 +288,7 @@ class PlexeOrchestrator:
     
     def _route_from_schema(self, state: PipelineState) -> Literal["success", "error"]:
         """Route from schema analysis node."""
-        if state.get("errors"):
+        if state.get("active_errors"):
             return "error"
         if state.get("csv_dir") and state.get("schema_info"):
             return "success"
@@ -287,45 +298,39 @@ class PlexeOrchestrator:
     
     def _route_from_dataset(self, state: PipelineState) -> Literal["success", "error"]:
         """Route from dataset building node."""
-        if state.get("errors"):
+        if state.get("active_errors"):
             return "error"
-        
-        # Check if dataset_info exists AND has no error
+
         dataset_info = state.get("dataset_info")
         if dataset_info:
-            # If dataset_info has error field, treat as failure
             if dataset_info.get("error"):
                 logger.error(f"Dataset building failed: {dataset_info.get('error')}")
                 return "error"
-        
-        # Also verify the actual file exists
+
         working_dir = state.get("working_dir", "")
         dataset_path = os.path.join(working_dir, "dataset.py")
         if os.path.exists(dataset_path):
             return "success"
-        
+
         logger.error(f"Dataset file not found at: {dataset_path}")
         return "error"
     
     def _route_from_task(self, state: PipelineState) -> Literal["success", "error"]:
         """Route from task building node."""
-        if state.get("errors"):
+        if state.get("active_errors"):
             return "error"
-        
-        # Check if task_info exists AND has no error
+
         task_info = state.get("task_info")
         if task_info:
-            # If task_info has error field, treat as failure
             if task_info.get("error"):
                 logger.error(f"Task building failed: {task_info.get('error')}")
                 return "error"
-        
-        # Also verify the actual file exists
+
         working_dir = state.get("working_dir", "")
         task_path = os.path.join(working_dir, "task.py")
         if os.path.exists(task_path):
             return "success"
-        
+
         logger.error(f"Task file not found at: {task_path}")
         return "error"
     
@@ -336,7 +341,7 @@ class PlexeOrchestrator:
         ``training_script_ready``.  Actual training execution is handled
         by the Operation Agent downstream.
         """
-        if state.get("errors"):
+        if state.get("active_errors"):
             return "error"
         if state.get("training_script_ready"):
             return "success"
@@ -347,14 +352,24 @@ class PlexeOrchestrator:
             return "success"
         return "error"
     
-    def _route_from_error(self, state: PipelineState) -> Literal["retry", "end"]:
-        """Route from error handler."""
-        # Safely get retry_count - handle None case explicitly
+    def _route_from_error(self, state: PipelineState) -> str:
+        """Route from error handler to the failed phase or END."""
         metadata = state.get("metadata") or {}
         retry_count = metadata.get("retry_count", 0)
-        if retry_count < self.config.max_retries:
-            return "retry"
-        return "end"
+        failed_phase = state.get("failed_phase", "conversation")
+        phase_max = self.config.retry_config.get(failed_phase, self.config.max_retries)
+
+        if retry_count >= phase_max:
+            return "end"
+
+        phase_to_node = {
+            PipelinePhase.SCHEMA_ANALYSIS.value: "schema_analysis",
+            PipelinePhase.DATASET_BUILDING.value: "dataset_building",
+            PipelinePhase.TASK_BUILDING.value: "task_building",
+            PipelinePhase.GNN_TRAINING.value: "gnn_training",
+            PipelinePhase.OPERATION.value: "operation",
+        }
+        return phase_to_node.get(failed_phase, "conversation")
     
     def _log_phase(self, phase: str, agent_name: str = ""):
         """Log phase transition with rich formatting."""

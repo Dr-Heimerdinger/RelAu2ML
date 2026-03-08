@@ -43,7 +43,23 @@ def generate_training_script(
         Path to generated script
     """
     import os
-    
+
+    # Normalize common metric aliases to actual function names in plexe.relbench.metrics
+    METRIC_NAME_MAP = {
+        "auroc": "roc_auc",
+        "auc": "roc_auc",
+        "roc_auc_score": "roc_auc",
+        "ap": "average_precision",
+        "mean_absolute_error": "mae",
+        "mean_squared_error": "mse",
+        "root_mean_squared_error": "rmse",
+        "r2_score": "r2",
+        "f1_score": "f1",
+        "map": "link_prediction_map",
+        "ndcg": "link_prediction_ndcg",
+    }
+    tune_metric = METRIC_NAME_MAP.get(tune_metric.lower(), tune_metric)
+
     working_dir = os.path.abspath(working_dir)
     
     # Use csv_dir from parameter or default to working_dir/csv_files
@@ -231,6 +247,25 @@ else:
 tune_metric = "{tune_metric}"
 higher_is_better = {higher_is_better}
 
+def _get_metric(metrics_dict, metric_name):
+    """Get metric value with alias fallback."""
+    if metric_name in metrics_dict:
+        v = metrics_dict[metric_name]
+        if v is not None and not (isinstance(v, float) and math.isnan(v)):
+            return v
+    # Alias fallback
+    aliases = {{
+        "auroc": "roc_auc", "roc_auc": "auroc", "auc": "roc_auc",
+        "ap": "average_precision", "average_precision": "ap",
+    }}
+    alt = aliases.get(metric_name)
+    if alt and alt in metrics_dict:
+        v = metrics_dict[alt]
+        if v is not None and not (isinstance(v, float) and math.isnan(v)):
+            print(f"  Note: '{{metric_name}}' not found, using '{{alt}}' instead")
+            return v
+    return None
+
 # --- Training loop ---
 state_dict = None
 best_val_metric = -math.inf if higher_is_better else math.inf
@@ -275,10 +310,16 @@ for epoch in range(1, {epochs} + 1):
     val_metrics = task.evaluate(val_pred, val_table)
     print(f"Epoch {{epoch}}/{epochs}: Loss={{train_loss:.4f}}, Val metrics: {{val_metrics}}")
 
-    if (higher_is_better and val_metrics[tune_metric] > best_val_metric) or (
-        not higher_is_better and val_metrics[tune_metric] < best_val_metric
+    current_val = _get_metric(val_metrics, tune_metric)
+    if current_val is None:
+        print(f"  Warning: metric '{{tune_metric}}' unavailable (got {{list(val_metrics.keys())}}), saving model by loss")
+        state_dict = copy.deepcopy(model.state_dict())
+        continue
+
+    if (higher_is_better and current_val > best_val_metric) or (
+        not higher_is_better and current_val < best_val_metric
     ):
-        best_val_metric = val_metrics[tune_metric]
+        best_val_metric = current_val
         state_dict = copy.deepcopy(model.state_dict())
         print(f"  -> New best model! {{tune_metric}}={{best_val_metric:.4f}}")
 

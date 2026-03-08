@@ -706,24 +706,27 @@ def register_task_code(
     if '\\"\\"\\"' in sanitized_code:
         sanitized_code = sanitized_code.replace('\\"\\"\\"', '"""')
     
-    # Validate that the code is syntactically valid Python
+    syntax_warnings = []
     try:
         ast.parse(sanitized_code)
     except SyntaxError as e:
-        # If there's still a syntax error, log it but continue
         import logging
         logging.warning(f"Generated code has syntax error: {e}")
-    
+        syntax_warnings.append(f"Syntax error at line {e.lineno}: {e.msg}")
+
     with open(file_path, 'w') as f:
         f.write(sanitized_code)
-    
-    return {
-        "status": "registered",
+
+    result = {
+        "status": "registered_with_warnings" if syntax_warnings else "registered",
         "class_name": class_name,
         "file_path": file_path,
         "task_type": task_type,
-        "code": code
+        "code": code,
     }
+    if syntax_warnings:
+        result["warnings"] = syntax_warnings
+    return result
 
 
 @langchain_tool

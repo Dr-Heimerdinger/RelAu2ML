@@ -1,0 +1,50 @@
+% =========================================================
+\section{Giai Đoạn Phân Tích và Kỹ Nghệ Dữ Liệu}
+% =========================================================
+
+Sau khi yêu cầu được xác nhận, hệ thống tiến hành phân tích cấu trúc cơ sở dữ liệu và chuẩn bị đầu vào cho quá trình mô hình hóa đồ thị. Giai đoạn này bao gồm ba tác tử kỹ thuật hoạt động tuần tự.
+
+\subsection{Tác Tử Phân Tích ($\mathcal{A}_{eda}$, EDA Agent)}
+
+Tác tử Phân tích $\mathcal{A}_{eda}$ chịu trách nhiệm khám phá và trích xuất siêu dữ liệu (metadata) từ cơ sở dữ liệu quan hệ do người dùng cung cấp.
+
+\paragraph{Cơ chế hoạt động.}
+$\mathcal{A}_{eda}$ truy vấn hệ quản trị cơ sở dữ liệu để thu thập các thông tin cấu trúc, bao gồm:
+
+\begin{itemize}
+    \item Danh sách các bảng và kiểu dữ liệu của từng cột.
+    \item Các ràng buộc toàn vẹn tham chiếu (khóa chính, khóa ngoại).
+    \item Các cột mang ngữ nghĩa thời gian (temporal columns).
+\end{itemize}
+
+Dựa trên kết quả thu thập, tác tử xây dựng một \textbf{bản đặc tả lược đồ} $\Phi$ (schema mapping), xác định vai trò của từng bảng: bảng thực thể chính (primary entity table), bảng ngữ cảnh (context table), và cột thời gian tham chiếu. Bản đặc tả $\Phi$ được ghi vào $\mathcal{S}_{schema}$ và là cơ sở để $\mathcal{A}_{builder}$ định hình cấu trúc đồ thị ở bước tiếp theo.
+
+\subsection{Tác Tử Xây Dựng Dữ Liệu ($\mathcal{A}_{builder}$, Dataset Builder Agent)}
+
+Tác tử Xây dựng Dữ liệu $\mathcal{A}_{builder}$ thực hiện chuyển đổi cơ sở dữ liệu quan hệ sang định dạng \textbf{đồ thị không đồng nhất} $\mathcal{G} = (\mathcal{V}, \mathcal{E}, \mathcal{T}_v, \mathcal{T}_e)$, trong đó $\mathcal{T}_v$ và $\mathcal{T}_e$ lần lượt là tập kiểu nút và kiểu cạnh.
+
+\paragraph{Cơ chế hoạt động.}
+Quá trình xây dựng đồ thị tuân theo nguyên tắc ánh xạ sau:
+
+\begin{itemize}
+    \item \textbf{Ánh xạ nút}: Mỗi hàng $r$ trong bảng $T_i$ được khởi tạo thành một nút $v \in \mathcal{V}$ có kiểu $\tau_v = T_i$.
+    \item \textbf{Ánh xạ cạnh}: Mỗi quan hệ khóa ngoại giữa bảng $T_i$ và $T_j$ được biểu diễn thành một cạnh có hướng $e = (v_i, v_j) \in \mathcal{E}$.
+    \item \textbf{Mã hóa đặc trưng}: Tác tử chỉ định bộ mã hóa phù hợp cho từng loại dữ liệu --- dữ liệu văn bản, số học, và phân loại --- để tạo ra véc-tơ đặc trưng ban đầu $\mathbf{h}_v^{(0)}$ cho mỗi nút.
+\end{itemize}
+
+Các định nghĩa cấu trúc đồ thị được lưu vào $\mathcal{S}_{spec}$ để $\mathcal{A}_{gnn}$ truy xuất ở giai đoạn tiếp theo.
+
+\subsection{Tác Tử Xây Dựng Tác Vụ ($\mathcal{A}_{task}$, Task Builder Agent)}
+
+Tác tử Xây dựng Tác vụ $\mathcal{A}_{task}$ định nghĩa bài toán dự đoán và cung cấp nhãn huấn luyện cho hệ thống học máy.
+
+\paragraph{Cơ chế hoạt động.}
+Dựa trên mục tiêu dự đoán được trích xuất từ $\mathcal{S}_{spec}$, tác tử sinh ra các truy vấn để tạo \textbf{bảng huấn luyện} $\mathcal{D}_{train} = \{(e_i, y_i, t_i)\}$, trong đó:
+
+\begin{itemize}
+    \item $e_i$: thực thể cần dự đoán,
+    \item $y_i$: nhãn thực tế được tính toán từ dữ liệu lịch sử,
+    \item $t_i$: mốc thời gian tham chiếu (reference timestamp).
+\end{itemize}
+
+Việc gắn mốc thời gian $t_i$ cho phép hệ thống áp dụng chiến lược lấy mẫu lân cận theo thời gian, đảm bảo chỉ các cạnh và nút xuất hiện trước $t_i$ mới được sử dụng trong quá trình huấn luyện, từ đó ngăn chặn hiện tượng rò rỉ dữ liệu từ tương lai (data leakage).

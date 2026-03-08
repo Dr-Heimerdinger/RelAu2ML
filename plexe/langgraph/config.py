@@ -7,7 +7,7 @@ using environment variables and defaults.
 
 import os
 from dataclasses import dataclass, field
-from typing import Optional
+from typing import Dict, Optional
 
 
 @dataclass
@@ -77,6 +77,14 @@ class AgentConfig:
     max_retries: int = field(default_factory=lambda: int(os.environ.get(
         "PLEXE_MAX_RETRIES", "3"
     )))
+    retry_config: Dict[str, int] = field(default_factory=lambda: {
+        "conversation": 1,
+        "schema_analysis": 3,
+        "dataset_building": 2,
+        "task_building": 2,
+        "gnn_training": 1,
+        "operation": 2,
+    })
     verbose: bool = field(default_factory=lambda: os.environ.get(
         "PLEXE_VERBOSE", "false"
     ).lower() == "true")

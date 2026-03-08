@@ -87,20 +87,29 @@ CODE GENERATION TOOL:
 
 HYPERPARAMETER GUIDELINES:
 
-Metric selection by task type (use exactly these values):
+Metric selection rules (in order of priority):
 
-| Task type              | tune_metric              | higher_is_better |
-|------------------------|--------------------------|------------------|
-| Regression             | "mae"                    | False            |
-| Binary Classification  | "average_precision"      | True             |
-| Multiclass             | "accuracy"               | True             |
-| Link Prediction        | "link_prediction_map"    | True             |
+1. USER-REQUESTED METRIC TAKES PRIORITY. If the context below includes a "User-requested
+   evaluation metric", you MUST use it. Never override or question the user's choice.
+   Map common names to tune_metric values:
+   - "AUROC" / "AUC" / "ROC AUC" -> tune_metric="roc_auc", higher_is_better=True
+   - "accuracy"                   -> tune_metric="accuracy", higher_is_better=True
+   - "F1" / "F1 score"           -> tune_metric="f1", higher_is_better=True
+   - "MAE"                       -> tune_metric="mae", higher_is_better=False
+   - "RMSE"                      -> tune_metric="rmse", higher_is_better=False
+   - "R2" / "R-squared"          -> tune_metric="r2", higher_is_better=True
+   - "average_precision" / "AP"  -> tune_metric="average_precision", higher_is_better=True
+   - "AUPRC"                     -> tune_metric="auprc", higher_is_better=True
+   - "MAP"                       -> tune_metric="link_prediction_map", higher_is_better=True
 
-For binary classification, average_precision (area under the precision-recall curve) is
-preferred over accuracy because most real-world binary tasks have imbalanced labels.
+2. Only when NO user metric is specified, use these defaults:
 
-If you encounter a task type not listed above, reason about what metric best captures
-the prediction quality and whether higher values are better.
+   | Task type              | tune_metric              | higher_is_better |
+   |------------------------|--------------------------|------------------|
+   | Regression             | "mae"                    | False            |
+   | Binary Classification  | "average_precision"      | True             |
+   | Multiclass             | "accuracy"               | True             |
+   | Link Prediction        | "link_prediction_map"    | True             |
 
 CRITICAL RULES:
 - ALWAYS use the generate_training_script tool to create train_script.py. NEVER write training scripts manually.

@@ -14,7 +14,7 @@ from langchain_core.callbacks import BaseCallbackHandler
 from langchain.agents import create_agent
 
 from plexe.langgraph.config import AgentConfig, get_llm_from_model_id
-from plexe.langgraph.state import PipelineState
+from plexe.langgraph.state import PipelineState, ErrorCategory
 from plexe.langgraph.utils import BaseEmitter, ChainOfThoughtCallback
 from plexe.langgraph.mcp_manager import MCPManager
 
@@ -318,10 +318,34 @@ class BaseAgent(ABC):
             return processed
         except Exception as e:
             logger.error(f"Agent {self.name} failed: {e}", exc_info=True)
+
+            category = ErrorCategory.PERMANENT.value
+            if isinstance(e, (TimeoutError, ConnectionError, ConnectionRefusedError, OSError)):
+                category = ErrorCategory.TRANSIENT.value
+            elif isinstance(e, (SyntaxError, ValueError)):
+                category = ErrorCategory.RECOVERABLE.value
+            else:
+                msg_lower = str(e).lower()
+                if "rate limit" in msg_lower or "429" in str(e) or "timeout" in msg_lower:
+                    category = ErrorCategory.TRANSIENT.value
+
+            from datetime import datetime
+            error_msg = f"{self.name} error ({category}): {str(e)}"
+            error_record = {
+                "agent": self.name,
+                "phase": "",
+                "category": category,
+                "message": str(e),
+                "exception_type": type(e).__name__,
+                "timestamp": datetime.now().isoformat(),
+            }
+
             if self.emitter:
                 self.emitter.emit_agent_end(self.name, f"Error: {str(e)}")
             return {
-                "errors": [f"{self.name} error: {str(e)}"]
+                "active_errors": [error_msg],
+                "error_records": [error_record],
+                "error_history": [f"{self.name} [{type(e).__name__}]: {str(e)}"],
             }
     
     def _build_messages(self, state: PipelineState) -> List:

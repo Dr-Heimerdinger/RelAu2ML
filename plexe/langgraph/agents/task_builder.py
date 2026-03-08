@@ -22,8 +22,6 @@ from plexe.langgraph.prompts.task_builder import TASK_BUILDER_SYSTEM_PROMPT
 
 logger = logging.getLogger(__name__)
 
-# Maximum retry attempts for incomplete tasks
-MAX_AGENT_RETRIES = 2
 
 class TaskBuilderAgent(BaseAgent):
     """Agent for building RelBench Task classes."""
@@ -66,10 +64,11 @@ class TaskBuilderAgent(BaseAgent):
         """
         working_dir = state.get("working_dir", "")
         task_path = os.path.join(working_dir, "task.py") if working_dir else ""
-        
-        for attempt in range(MAX_AGENT_RETRIES + 1):
+        max_retries = self.config.retry_config.get("task_building", 2)
+
+        for attempt in range(max_retries + 1):
             if attempt > 0:
-                logger.warning(f"TaskBuilderAgent retry attempt {attempt}/{MAX_AGENT_RETRIES}")
+                logger.warning(f"TaskBuilderAgent retry attempt {attempt}/{max_retries}")
                 if self.emitter:
                     self.emitter.emit_thought(
                         self.name, 
@@ -84,8 +83,7 @@ class TaskBuilderAgent(BaseAgent):
                 logger.info(f"TaskBuilderAgent successfully created {task_path}")
                 return result
             
-            # If this is not the last attempt, prepare for retry
-            if attempt < MAX_AGENT_RETRIES:
+            if attempt < max_retries:
                 # Add a follow-up message to force completion
                 retry_message = self._build_retry_message(working_dir, state.get("csv_dir", ""))
                 
@@ -328,11 +326,8 @@ You CANNOT proceed without dataset.py. Report this error.
         else:
             error_msg = f"CRITICAL ERROR: Task file not found at {task_path}. TaskBuilderAgent did not complete its task. The agent must call register_task_code() to generate task.py."
             logger.error(error_msg)
-            # Add to errors list so routing detects failure
-            existing_errors = base_result.get("errors", []) or []
-            existing_errors.append(error_msg)
-            base_result["errors"] = existing_errors
-            base_result["status"] = "error"
+            base_result["active_errors"] = [error_msg]
+            base_result["error_history"] = [error_msg]
             # Set task_info with error flag for debugging
             task_info["class_name"] = "GenTask"
             task_info["file_path"] = task_path

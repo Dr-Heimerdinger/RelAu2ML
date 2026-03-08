@@ -21,13 +21,15 @@ def get_csv_files_info(csv_dir: str) -> Dict[str, Any]:
     # Check if directory exists
     if not os.path.exists(csv_dir):
         return {
+            "status": "error",
             "error": f"Directory does not exist: {csv_dir}",
             "files": [],
             "count": 0
         }
-    
+
     if not os.path.isdir(csv_dir):
         return {
+            "status": "error",
             "error": f"Path is not a directory: {csv_dir}",
             "files": [],
             "count": 0
@@ -51,6 +53,7 @@ def get_csv_files_info(csv_dir: str) -> Dict[str, Any]:
                     files.append({"name": f, "error": str(e)})
     except Exception as e:
         return {
+            "status": "error",
             "error": f"Error reading directory: {str(e)}",
             "files": [],
             "count": 0
@@ -79,6 +82,7 @@ def get_temporal_statistics(csv_dir: str) -> Dict[str, Any]:
     # Check if directory exists
     if not os.path.exists(csv_dir):
         return {
+            "status": "error",
             "error": f"Directory does not exist: {csv_dir}",
             "temporal_stats": {},
             "suggested_splits": {}
@@ -244,20 +248,23 @@ def register_dataset_code(
     if '\\"\\"\\"' in sanitized_code:
         sanitized_code = sanitized_code.replace('\\"\\"\\"', '"""')
     
-    # Validate that the code is syntactically valid Python
+    syntax_warnings = []
     try:
         ast.parse(sanitized_code)
     except SyntaxError as e:
-        # If there's still a syntax error, log it but continue
         import logging
         logging.warning(f"Generated code has syntax error: {e}")
-    
+        syntax_warnings.append(f"Syntax error at line {e.lineno}: {e.msg}")
+
     with open(file_path, 'w') as f:
         f.write(sanitized_code)
-    
-    return {
-        "status": "registered",
+
+    result = {
+        "status": "registered_with_warnings" if syntax_warnings else "registered",
         "class_name": class_name,
         "file_path": file_path,
-        "code": code
+        "code": code,
     }
+    if syntax_warnings:
+        result["warnings"] = syntax_warnings
+    return result

@@ -3,6 +3,7 @@ import json
 import os
 import re
 import sys
+import time
 import asyncio
 import threading
 from typing import List, Dict, Any, Optional
@@ -14,6 +15,40 @@ from dotenv import load_dotenv
 from contextlib import AsyncExitStack
 
 logger = logging.getLogger(__name__)
+
+
+class CircuitBreaker:
+    """Prevents repeated calls to a failing service.
+
+    After *failure_threshold* consecutive failures the circuit opens and
+    rejects calls immediately for *reset_timeout* seconds, then auto-resets.
+    """
+
+    def __init__(self, failure_threshold: int = 3, reset_timeout: float = 300.0):
+        self._failures: Dict[str, int] = {}
+        self._open_until: Dict[str, float] = {}
+        self.failure_threshold = failure_threshold
+        self.reset_timeout = reset_timeout
+
+    def is_open(self, key: str) -> bool:
+        deadline = self._open_until.get(key)
+        if deadline is None:
+            return False
+        if time.monotonic() < deadline:
+            return True
+        del self._open_until[key]
+        self._failures[key] = 0
+        return False
+
+    def record_failure(self, key: str):
+        self._failures[key] = self._failures.get(key, 0) + 1
+        if self._failures[key] >= self.failure_threshold:
+            self._open_until[key] = time.monotonic() + self.reset_timeout
+            logger.warning(f"Circuit breaker opened for '{key}' after {self._failures[key]} failures")
+
+    def record_success(self, key: str):
+        self._failures.pop(key, None)
+        self._open_until.pop(key, None)
 
 
 class MCPManager:
@@ -31,6 +66,7 @@ class MCPManager:
         self.sessions: Dict[str, Any] = {}
         self.tools: List[BaseTool] = []
         self._exit_stack = AsyncExitStack()
+        self.circuit_breaker = CircuitBreaker()
         load_dotenv()
 
         self._loop: Optional[asyncio.AbstractEventLoop] = None
@@ -135,20 +171,27 @@ class MCPManager:
         """Convert an MCP tool definition to a LangChain BaseTool with proper schema."""
 
         persistent_loop = self._loop
+        cb = self.circuit_breaker
+        tool_name = tool_info.name
 
         async def tool_func_async(**kwargs):
-            result = await session.call_tool(tool_info.name, kwargs)
+            result = await session.call_tool(tool_name, kwargs)
             return "\n".join([str(c.text) if hasattr(c, 'text') else str(c) for c in result.content])
 
         def tool_func_sync(**kwargs):
+            if cb.is_open(tool_name):
+                return f"MCP tool '{tool_name}' temporarily unavailable (circuit breaker open). Skipping."
             try:
                 if persistent_loop is None or persistent_loop.is_closed():
                     return "MCP tool error: background event loop is not running"
                 future = asyncio.run_coroutine_threadsafe(
                     tool_func_async(**kwargs), persistent_loop
                 )
-                return future.result(timeout=120)
+                result = future.result(timeout=120)
+                cb.record_success(tool_name)
+                return result
             except Exception as e:
+                cb.record_failure(tool_name)
                 return f"MCP tool error: {str(e)}"
 
         input_schema = getattr(tool_info, 'inputSchema', None)

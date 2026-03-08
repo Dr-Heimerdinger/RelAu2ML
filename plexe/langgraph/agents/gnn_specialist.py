@@ -81,6 +81,14 @@ class RelationalGNNSpecialistAgent(BaseAgent):
             context_parts.append(f"Task class: GenTask")
             context_parts.append(f"Task type: binary_classification")
             task_type = "binary_classification"
+
+        user_metric = None
+        user_intent = state.get("user_intent")
+        if isinstance(user_intent, dict):
+            user_metric = user_intent.get("evaluation_metric")
+        if user_metric:
+            context_parts.append(f"User-requested evaluation metric: {user_metric}")
+            context_parts.append(f"YOU MUST use tune_metric based on '{user_metric}'. Do NOT override with a different metric.")
         
         # Build dataset characteristics for HPO search
         # Safely get schema_info - handle None case explicitly
@@ -182,13 +190,14 @@ IMPORTANT:
         working_dir = state.get("working_dir", "")
         script_path = os.path.join(working_dir, "train_script.py")
         
-        # Check if training script was generated
         if os.path.exists(script_path):
             base_result["training_script_ready"] = True
             base_result["training_script_path"] = script_path
             logger.info(f"Training script generated at {script_path}")
         else:
-            logger.warning("Training script not found")
+            error_msg = f"Training script not generated at {script_path}"
+            logger.error(error_msg)
+            base_result["active_errors"] = [error_msg]
             base_result["training_script_ready"] = False
         
         # Store selected hyperparameters in state for Operation Agent

@@ -1,0 +1,26 @@
+% =========================================================
+\section{Giai Đoạn Mô Hình Hóa và Thực Thi}
+% =========================================================
+
+Giai đoạn cuối tập trung vào việc thiết kế kiến trúc mạng nơ-ron đồ thị và điều phối quá trình huấn luyện trong môi trường thực thi.
+
+\subsection{Tác Tử Chuyên Gia GNN ($\mathcal{A}_{gnn}$, Relational GNN Specialist Agent)}
+
+Tác tử Chuyên gia GNN $\mathcal{A}_{gnn}$ nhận đầu vào là định nghĩa bài toán và cấu trúc đồ thị $\mathcal{G}$, từ đó thiết kế kiến trúc mô hình và sinh kịch bản huấn luyện hoàn chỉnh.
+
+\paragraph{Cơ chế hoạt động.}
+$\mathcal{A}_{gnn}$ phân tích các tính chất của đồ thị không đồng nhất $\mathcal{G}$ --- bao gồm số lượng kiểu nút, kiểu cạnh, và phân phối bậc --- để lựa chọn các lớp truyền thông điệp (message passing layers) phù hợp. Kịch bản huấn luyện được sinh ra bao gồm các thành phần sau:
+
+\begin{itemize}
+    \item Khởi tạo mô hình với kiến trúc đã chọn.
+    \item Cấu hình hàm mất mát $\mathcal{L}$ tương ứng với loại bài toán (phân loại hoặc hồi quy).
+    \item Lựa chọn thuật toán tối ưu (optimizer) và lịch điều chỉnh tốc độ học (learning rate scheduler).
+    \item Định nghĩa các độ đo đánh giá hiệu năng $\mathcal{M} = \{m_1, m_2, \ldots\}$.
+\end{itemize}
+
+\subsection{Tác Tử Vận Hành ($\mathcal{A}_{ops}$, Operation Agent)}
+
+Tác tử Vận hành $\mathcal{A}_{ops}$ quản lý môi trường thực thi và điều phối việc thi hành các đoạn mã do các tác tử trước sinh ra.
+
+\paragraph{Cơ chế hoạt động.}
+$\mathcal{A}_{ops}$ khởi tạo quy trình thực thi cô lập, nạp dữ liệu đồ thị $\mathcal{G}$ và bảng huấn luyện $\mathcal{D}_{train}$, sau đó thực hiện vòng lặp huấn luyện. Trong suốt quá trình này, tác tử giám sát đồng thời luồng đầu ra chuẩn và luồng lỗi chuẩn. Khi quá trình hoàn tất, các kết quả đánh giá $\mathcal{M}$ được trích xuất và ghi vào $\mathcal{S}_{exec}$ để tổng hợp báo cáo cho người dùng.
