@@ -268,12 +268,14 @@ You CANNOT proceed without dataset.py. Report this error.
    - pattern_candidates (ranked suggestions -- use as guidance, not as absolute rule)
    - building_blocks (whether CTE, nested JOIN, quality filter, or HAVING is needed)
    - schema_hints.potential_join_tables (tables that share columns with the event table)
+   - schema_hints.categorical_columns (low-cardinality type columns that may need WHERE filters — check if any match the task semantics)
+   - schema_hints.sentinel_warnings (entity ID sentinel values like -1 or NULL to exclude)
 5. Identify entity table, entity column, time column, and target column
 6. Design SQL query using your selected pattern. Consider composable building blocks (Part 4B) if needed:
    - CTE: for multi-table preprocessing or combining event sources
    - Nested LEFT JOIN: for entity-event pre-join patterns
    - Chained JOIN: for link prediction through junction tables
-   - Quality filters: for rating/length/status conditions
+   - Quality/categorical filters: for type columns, rating/status conditions, sentinel exclusion
 7. Choose appropriate metrics based on task type
 8. For link prediction: set eval_k (typical: 10-12)
 9. Test your SQL: test_sql_query("{csv_dir}", query)
@@ -297,30 +299,68 @@ You CANNOT proceed without dataset.py. Report this error.
 - Use duckdb.register() for every DataFrame, then duckdb.sql()
 - Return Table with proper fkey_col_to_pkey_table mapping
 - If data range is narrow (< 3 months) or data_range/timedelta < 5, set num_eval_timestamps = 40
+- When analyze_task_structure() reports categorical_columns, check if any match the task semantics and add WHERE filters for relevant values (e.g., PostTypeId=1 for questions, VoteTypeId=2 for upvotes)
+- When sentinel_warnings are reported, add filters to exclude sentinel entity IDs (e.g., WHERE entity_id != -1 AND entity_id IS NOT NULL)
 """)
         
         return "\n".join(context_parts)
     
+    @staticmethod
+    def _read_task_type_from_file(task_path: str) -> Optional[str]:
+        """Read the TaskType value from a generated task.py file."""
+        try:
+            with open(task_path) as f:
+                for line in f:
+                    stripped = line.strip()
+                    if stripped.startswith("task_type"):
+                        low = stripped.lower()
+                        if "regression" in low:
+                            return "regression"
+                        if "binary" in low or "classification" in low:
+                            return "binary_classification"
+                        if "link" in low:
+                            return "link_prediction"
+        except Exception:
+            pass
+        return None
+
     def _process_result(self, result: Dict[str, Any], state: PipelineState) -> Dict[str, Any]:
         """Process result and extract task information."""
         base_result = super()._process_result(result, state)
-        
+
         task_info = {}
         generated_code = state.get("generated_code", {})
         working_dir = state.get("working_dir", "")
-        
+
         task_path = os.path.join(working_dir, "task.py")
         if os.path.exists(task_path):
             task_info["class_name"] = "GenTask"
             task_info["file_path"] = task_path
             logger.info(f"Task file created at: {task_path}")
-            
+
             intent = state.get("user_intent", {})
-            if isinstance(intent, dict):
-                task_info["task_type"] = intent.get("task_type", "binary_classification")
-            else:
-                task_info["task_type"] = "binary_classification"
-            
+            expected_type = intent.get("task_type", "binary_classification") if isinstance(intent, dict) else "binary_classification"
+            task_info["task_type"] = expected_type
+
+            # Validate: the generated file's task_type must match the
+            # user's intent.  If the LLM wrote the wrong type, flag an
+            # error so the retry loop can fix it.
+            file_type = self._read_task_type_from_file(task_path)
+            if file_type and file_type != expected_type:
+                mismatch_msg = (
+                    f"Task type mismatch: user intent is '{expected_type}' "
+                    f"(metric: {intent.get('evaluation_metric', 'N/A') if isinstance(intent, dict) else 'N/A'}) "
+                    f"but generated task.py uses '{file_type}'. "
+                    f"Deleting task.py to force a retry with the correct type."
+                )
+                logger.error(mismatch_msg)
+                # Remove the bad file so the retry loop detects it as missing
+                os.remove(task_path)
+                base_result["active_errors"] = [mismatch_msg]
+                base_result["error_history"] = [mismatch_msg]
+                base_result["current_phase"] = PipelinePhase.TASK_BUILDING.value
+                return base_result
+
             base_result["task_info"] = task_info
             base_result["current_phase"] = PipelinePhase.GNN_TRAINING.value
         else:

@@ -2,49 +2,65 @@
 \section{Giai Đoạn Phân Tích và Kỹ Nghệ Dữ Liệu}
 % =========================================================
 
-Sau khi yêu cầu được xác nhận, hệ thống tiến hành phân tích cấu trúc cơ sở dữ liệu và chuẩn bị đầu vào cho quá trình mô hình hóa đồ thị. Giai đoạn này bao gồm ba tác tử kỹ thuật hoạt động tuần tự.
+Sau khi yêu cầu được xác nhận, hệ thống tiến hành phân tích cấu trúc cơ sở dữ liệu và chuẩn bị đầu vào cho quá trình mô hình hóa đồ thị. Giai đoạn này bao gồm ba tác tử kỹ thuật hoạt động tuần tự, mỗi tác tử sinh ra một sản phẩm (artifact) cụ thể mà tác tử kế tiếp sử dụng.
 
 \subsection{Tác Tử Phân Tích ($\mathcal{A}_{eda}$, EDA Agent)}
 
-Tác tử Phân tích $\mathcal{A}_{eda}$ chịu trách nhiệm khám phá và trích xuất siêu dữ liệu (metadata) từ cơ sở dữ liệu quan hệ do người dùng cung cấp.
+Tác tử Phân tích $\mathcal{A}_{eda}$ chịu trách nhiệm khám phá và trích xuất siêu dữ liệu (metadata) từ cơ sở dữ liệu quan hệ do người dùng cung cấp. Đây là tác tử đầu tiên tương tác trực tiếp với dữ liệu thô, và kết quả phân tích của nó định hình toàn bộ quyết định thiết kế ở các giai đoạn sau.
 
 \paragraph{Cơ chế hoạt động.}
-$\mathcal{A}_{eda}$ truy vấn hệ quản trị cơ sở dữ liệu để thu thập các thông tin cấu trúc, bao gồm:
+$\mathcal{A}_{eda}$ được trang bị năm công cụ phân tích chuyên dụng, mỗi công cụ tập trung vào một khía cạnh của dữ liệu:
 
 \begin{itemize}
-    \item Danh sách các bảng và kiểu dữ liệu của từng cột.
-    \item Các ràng buộc toàn vẹn tham chiếu (khóa chính, khóa ngoại).
-    \item Các cột mang ngữ nghĩa thời gian (temporal columns).
+    \item \texttt{analyze\_csv\_statistics}: Thu thập thống kê mô tả cho từng bảng và từng cột --- bao gồm số lượng hàng, kiểu dữ liệu, phân phối giá trị null, thống kê số học (trung bình, trung vị, tứ phân vị), và phân phối giá trị cho cột phân loại.
+    \item \texttt{detect\_data\_quality\_issues}: Phát hiện các vấn đề chất lượng dữ liệu với ba mức nghiêm trọng (\textit{high}, \textit{medium}, \textit{low}) --- bao gồm tỷ lệ giá trị thiếu cao ($>50\%$), cột hằng số, cột có bản số cao (high cardinality), và hàng trùng lặp.
+    \item \texttt{analyze\_temporal\_patterns}: Xác định các cột mang ngữ nghĩa thời gian bằng cách phân tích cú pháp ngày tháng (date parsing), tính toán khoảng cách trung bình giữa các sự kiện, và đề xuất ngưỡng chia tập huấn luyện/kiểm thử dựa trên phân vị 70/85/100.
+    \item \texttt{analyze\_table\_relationships}: Phân tích quan hệ khóa ngoại giữa các bảng và tự động phân loại từng bảng theo vai trò --- tương ứng với phân loại bảng dữ kiện và bảng chiều đã trình bày trong Mục~\ref{sec:relational_data}: \textit{fact table} (bảng dữ kiện --- chứa dữ liệu giao dịch, có khóa ngoại nhưng không được tham chiếu), \textit{dimension table} (bảng chiều --- được tham chiếu bởi các bảng khác), hoặc \textit{dimension\_with\_hierarchy} (bảng chiều có cấu trúc phân cấp).
+    \item \texttt{generate\_eda\_summary}: Tổng hợp kết quả từ bốn công cụ trên thành báo cáo toàn cảnh với các phát hiện chính và khuyến nghị cho bước mô hình hóa.
 \end{itemize}
 
-Dựa trên kết quả thu thập, tác tử xây dựng một \textbf{bản đặc tả lược đồ} $\Phi$ (schema mapping), xác định vai trò của từng bảng: bảng thực thể chính (primary entity table), bảng ngữ cảnh (context table), và cột thời gian tham chiếu. Bản đặc tả $\Phi$ được ghi vào $\mathcal{S}_{schema}$ và là cơ sở để $\mathcal{A}_{builder}$ định hình cấu trúc đồ thị ở bước tiếp theo.
+Dựa trên kết quả thu thập, tác tử xây dựng một \textbf{bản đặc tả lược đồ} $\Phi$ (\texttt{SchemaInfo}), xác định vai trò của từng bảng: bảng thực thể chính (primary entity table), bảng ngữ cảnh (context table), và cột thời gian tham chiếu. Kết quả phân loại fact/dimension có ý nghĩa quan trọng đối với các bước tiếp theo: tác tử được hướng dẫn trong system prompt rằng \textit{bảng thực thể (dimension) nên được sử dụng làm đối tượng dự đoán, trong khi bảng sự kiện (fact) cung cấp ngữ cảnh lịch sử trong truy vấn SQL}. Bản đặc tả $\Phi$ được ghi vào $\mathcal{S}_{schema}$ và là cơ sở để $\mathcal{A}_{builder}$ định hình cấu trúc đồ thị ở bước tiếp theo.
 
 \subsection{Tác Tử Xây Dựng Dữ Liệu ($\mathcal{A}_{builder}$, Dataset Builder Agent)}
 
-Tác tử Xây dựng Dữ liệu $\mathcal{A}_{builder}$ thực hiện chuyển đổi cơ sở dữ liệu quan hệ sang định dạng \textbf{đồ thị không đồng nhất} $\mathcal{G} = (\mathcal{V}, \mathcal{E}, \mathcal{T}_v, \mathcal{T}_e)$, trong đó $\mathcal{T}_v$ và $\mathcal{T}_e$ lần lượt là tập kiểu nút và kiểu cạnh.
+Tác tử Xây dựng Dữ liệu $\mathcal{A}_{builder}$ thực hiện chuyển đổi cơ sở dữ liệu quan hệ sang định dạng \textbf{đồ thị thực thể quan hệ} (Mục~\ref{sec:relation-graph}) $\mathcal{G} = (\mathcal{V}, \mathcal{E}, \mathcal{T}_v, \mathcal{T}_e)$, trong đó $\mathcal{T}_v$ và $\mathcal{T}_e$ lần lượt là tập kiểu nút và kiểu cạnh. Nói cách khác, $\mathcal{A}_{builder}$ tự động hóa bước chuyển đổi từ cơ sở dữ liệu quan hệ $(\mathcal{T}, \mathcal{L})$ sang đồ thị dị thể $G=(\mathcal{V},\mathcal{E},\phi,\psi)$ mà Mục~\ref{sec:relation-graph} đã định nghĩa một cách hình thức. Sản phẩm đầu ra là tệp \texttt{dataset.py} chứa lớp \texttt{GenDataset} tuân thủ giao diện \texttt{Dataset} của khung RelBench~\cite{robinson2024relbench}.
 
 \paragraph{Cơ chế hoạt động.}
 Quá trình xây dựng đồ thị tuân theo nguyên tắc ánh xạ sau:
 
 \begin{itemize}
-    \item \textbf{Ánh xạ nút}: Mỗi hàng $r$ trong bảng $T_i$ được khởi tạo thành một nút $v \in \mathcal{V}$ có kiểu $\tau_v = T_i$.
-    \item \textbf{Ánh xạ cạnh}: Mỗi quan hệ khóa ngoại giữa bảng $T_i$ và $T_j$ được biểu diễn thành một cạnh có hướng $e = (v_i, v_j) \in \mathcal{E}$.
-    \item \textbf{Mã hóa đặc trưng}: Tác tử chỉ định bộ mã hóa phù hợp cho từng loại dữ liệu --- dữ liệu văn bản, số học, và phân loại --- để tạo ra véc-tơ đặc trưng ban đầu $\mathbf{h}_v^{(0)}$ cho mỗi nút.
+    \item \textbf{Ánh xạ nút}: Mỗi hàng $r$ trong bảng $T_i$ được khởi tạo thành một nút $v \in \mathcal{V}$ có kiểu $\tau_v = T_i$. Khóa chính của mỗi bảng được sử dụng làm định danh nút.
+    \item \textbf{Ánh xạ cạnh}: Mỗi quan hệ khóa ngoại giữa bảng $T_i$ và $T_j$ được biểu diễn thành một cạnh có hướng $e = (v_i, v_j) \in \mathcal{E}$. Hàm \texttt{make\_pkey\_fkey\_graph} trong module \texttt{plexe.relbench.modeling.graph} thực hiện quá trình này một cách tự động, đồng thời tạo cạnh ngược (reverse edges) tương ứng với $\mathcal{L}^{-1}$ trong đồ thị lược đồ (Mục~\ref{sec:schema-graph}), đảm bảo tính đối xứng trong quá trình truyền thông điệp.
+    \item \textbf{Mã hóa đặc trưng}: Hệ thống tự động đề xuất bộ mã hóa (\texttt{stype}) phù hợp cho từng loại dữ liệu thông qua hàm \texttt{get\_stype\_proposal}, hiện thực hóa lớp mã hóa cột đa phương thức (multimodal column encoders) đã trình bày trong Mục~\ref{sec:encoders}: dữ liệu số học sử dụng \texttt{LinearEncoder}, dữ liệu phân loại sử dụng \texttt{EmbeddingEncoder}, dữ liệu đa phân loại sử dụng \texttt{MultiCategoricalEmbeddingEncoder}, dữ liệu văn bản sử dụng \texttt{LinearEmbeddingEncoder} kết hợp với mô hình nhúng GloVe-6B-300d, và dữ liệu thời gian sử dụng \texttt{TimestampEncoder}. Các cột khóa chính và khóa ngoại được loại bỏ khỏi tập đặc trưng đầu vào.
 \end{itemize}
 
-Các định nghĩa cấu trúc đồ thị được lưu vào $\mathcal{S}_{spec}$ để $\mathcal{A}_{gnn}$ truy xuất ở giai đoạn tiếp theo.
+\paragraph{Xác thực mã sinh ra.}
+Mã do $\mathcal{A}_{builder}$ sinh ra được xác thực trước khi ghi vào hệ thống tệp thông qua công cụ \texttt{register\_dataset\_code}, bao gồm ba bước kiểm tra: (i)~phân tích cú pháp bằng \texttt{ast.parse()}, (ii)~xác minh sự tồn tại của lớp \texttt{GenDataset}, và (iii)~phát hiện các thư viện được sử dụng nhưng chưa được import. Mã không vượt qua các bước kiểm tra này bị từ chối ngay lập tức, kèm theo thông báo lỗi cụ thể để tác tử sửa chữa.
+
+Các định nghĩa cấu trúc đồ thị được lưu vào $\mathcal{S}_{spec}$ để $\mathcal{A}_{task}$ và $\mathcal{A}_{gnn}$ truy xuất ở các giai đoạn tiếp theo.
 
 \subsection{Tác Tử Xây Dựng Tác Vụ ($\mathcal{A}_{task}$, Task Builder Agent)}
 
-Tác tử Xây dựng Tác vụ $\mathcal{A}_{task}$ định nghĩa bài toán dự đoán và cung cấp nhãn huấn luyện cho hệ thống học máy.
+Tác tử Xây dựng Tác vụ $\mathcal{A}_{task}$ định nghĩa bài toán dự đoán và cung cấp nhãn huấn luyện cho hệ thống học máy. Cụ thể, $\mathcal{A}_{task}$ tự động hóa quá trình xây dựng \textbf{bảng huấn luyện} $T_{train}$ với cấu trúc $(\mathcal{K}_v, t_v, y_v)$ đã được định nghĩa hình thức trong Mục~\ref{sec:task_to_training_table}. Sản phẩm đầu ra là tệp \texttt{task.py} chứa lớp \texttt{GenTask} tuân thủ giao diện \texttt{EntityTask} của RelBench.
 
 \paragraph{Cơ chế hoạt động.}
-Dựa trên mục tiêu dự đoán được trích xuất từ $\mathcal{S}_{spec}$, tác tử sinh ra các truy vấn để tạo \textbf{bảng huấn luyện} $\mathcal{D}_{train} = \{(e_i, y_i, t_i)\}$, trong đó:
+Dựa trên mục tiêu dự đoán được trích xuất từ $\mathcal{S}_{spec}$ và kết quả EDA từ $\mathcal{S}_{schema}$, tác tử sinh ra các truy vấn SQL qua DuckDB để tạo \textbf{bảng huấn luyện} $\mathcal{D}_{train} = \{(e_i, y_i, t_i)\}$, trong đó:
 
 \begin{itemize}
-    \item $e_i$: thực thể cần dự đoán,
+    \item $e_i$: thực thể cần dự đoán (ví dụ: khách hàng, sản phẩm),
     \item $y_i$: nhãn thực tế được tính toán từ dữ liệu lịch sử,
     \item $t_i$: mốc thời gian tham chiếu (reference timestamp).
 \end{itemize}
 
-Việc gắn mốc thời gian $t_i$ cho phép hệ thống áp dụng chiến lược lấy mẫu lân cận theo thời gian, đảm bảo chỉ các cạnh và nút xuất hiện trước $t_i$ mới được sử dụng trong quá trình huấn luyện, từ đó ngăn chặn hiện tượng rò rỉ dữ liệu từ tương lai (data leakage).
+\paragraph{Tri thức chuyên gia nhúng trong prompt.}
+Một đóng góp thiết kế đáng chú ý của \tool là việc nhúng tri thức chuyên gia về xây dựng bảng huấn luyện trực tiếp vào system prompt của $\mathcal{A}_{task}$. Prompt này chứa hai mẫu thiết kế SQL (SQL design patterns) --- gọi lần lượt là \textit{Pattern A} và \textit{Pattern B} --- mà tác tử lựa chọn dựa trên phân tích cấu trúc dữ liệu:
+
+\begin{itemize}
+    \item \textbf{Pattern A} (Entity-based): Áp dụng khi bảng thực thể (dimension table) có tồn tại rõ ràng và tách biệt khỏi bảng sự kiện. Truy vấn SQL lấy danh sách thực thể từ bảng thực thể, sau đó kết hợp với bảng sự kiện qua cửa sổ thời gian $[t_i - \Delta, t_i)$ để tính toán nhãn. Đây là mẫu phổ biến nhất, phù hợp với các bài toán như dự đoán rời bỏ khách hàng (churn prediction) hoặc dự đoán doanh thu.
+    \item \textbf{Pattern B} (Event-derived): Áp dụng khi không có bảng thực thể riêng biệt --- các thực thể được trích xuất trực tiếp từ bảng sự kiện (ví dụ, danh sách người dùng duy nhất từ bảng giao dịch). Truy vấn SQL sử dụng \texttt{DISTINCT} trên cột thực thể của bảng sự kiện.
+\end{itemize}
+
+Ngoài ra, prompt nhúng một bộ \textbf{công cụ phân tích trước khi thiết kế SQL} (\texttt{analyze\_task\_structure}) giúp tác tử xác định: (i)~nguồn gốc thực thể (bảng thực thể hay bảng sự kiện), (ii)~phân tích khoảng cách thời gian (temporal gap analysis) giữa các sự kiện, và (iii)~tín hiệu ngữ nghĩa từ mô tả tác vụ (phân loại, hồi quy, hay liên kết). Kết quả phân tích này được sử dụng để tự động lựa chọn mẫu SQL phù hợp, giảm thiểu rủi ro sinh truy vấn không chính xác.
+
+\paragraph{Phòng chống rò rỉ dữ liệu.}
+Việc gắn mốc thời gian $t_i$ cho phép hệ thống áp dụng chiến lược lấy mẫu lân cận nhất quán theo thời gian đã trình bày trong Mục~\ref{sec:time-consistent} (\texttt{temporal\_strategy="uniform"} trong \texttt{NeighborLoader} của PyG), đảm bảo chỉ các cạnh và nút xuất hiện trước $t_i$ mới được sử dụng trong quá trình huấn luyện, từ đó ngăn chặn hiện tượng rò rỉ dữ liệu từ tương lai (temporal data leakage). Ngưỡng chia tập val/test được xác định dựa trên phân phối thời gian do $\mathcal{A}_{eda}$ phân tích ở bước trước.

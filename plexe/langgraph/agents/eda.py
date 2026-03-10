@@ -108,8 +108,8 @@ EXECUTE THESE STEPS:
                     tool_result = tool_call.get("result", {})
                     
                     if tool_name == "export_tables_to_csv":
-                        if csv_dir:
-                            base_result["csv_dir"] = csv_dir
+                        # csv_dir will be validated via filesystem check below
+                        pass
                     
                     if tool_name == "extract_schema_metadata":
                         if isinstance(tool_result, dict) and "tables" in tool_result:
@@ -136,12 +136,22 @@ EXECUTE THESE STEPS:
                         if tool_result.get("status") == "success":
                             eda_info["summary"] = tool_result.get("summary")
         
-        if csv_dir:
+        # Only set csv_dir if export actually produced files
+        import os
+        if csv_dir and os.path.isdir(csv_dir) and any(
+            f.endswith('.csv') for f in os.listdir(csv_dir)
+        ):
             base_result["csv_dir"] = csv_dir
-        
+        elif csv_dir:
+            logger.warning(f"CSV directory {csv_dir} does not exist or is empty — not setting csv_dir")
+            base_result["active_errors"] = [
+                f"EDA completed but no CSV files were exported to {csv_dir}. "
+                "Ensure the database connection string is correct and export_tables_to_csv was called."
+            ]
+
         if eda_info:
             base_result["eda_info"] = eda_info
-        
+
         base_result["current_phase"] = PipelinePhase.DATASET_BUILDING.value
-        
+
         return base_result

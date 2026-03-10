@@ -1,0 +1,31 @@
+\section{Từ Tác vụ đến Bảng Huấn luyện} \label{sec:task_to_training_table}
+Nhiều bài toán học máy quan trọng trong thực tiễn được đặt ra trên các cơ sở dữ liệu quan hệ và thường gắn liền với việc dự đoán trạng thái hoặc hành vi trong tương lai của các thực thể quan tâm. Một câu hỏi then chốt khi xây dựng mô hình cho các tác vụ này là làm thế nào để xác định và tạo ra các nhãn huấn luyện thực tế (ground-truth labels) một cách nhất quán và có hệ thống.
+
+Ý tưởng cốt lõi là các nhãn huấn luyện có thể được suy ra trực tiếp từ dữ liệu lịch sử đã quan sát. Cụ thể, tại một thời điểm mốc $t$, nhãn thực tế cho tác vụ dự đoán chẳng hạn như ``mỗi khách hàng sẽ chi tiêu bao nhiêu trong $90$ ngày tới'' có thể được tính bằng cách tổng hợp tổng mức chi tiêu của từng khách hàng trong khoảng thời gian $[t, t+90]$. Miễn là thời điểm $t+90$ không vượt quá nhãn thời gian lớn nhất được ghi nhận trong cơ sở dữ liệu, toàn bộ quá trình tạo nhãn này có thể được thực hiện hoàn toàn tự động, không cần đến sự gán nhãn thủ công hay nguồn chú thích bên ngoài. Hơn nữa, bằng cách lựa chọn nhiều thời điểm mốc $t$ khác nhau trên trục thời gian của dữ liệu, ta có thể thu thập một tập hợp phong phú các nhãn huấn luyện lịch sử cho mỗi thực thể.
+
+\begin{figure*}
+    \centering
+    \includegraphics[width=1.0\linewidth]{figures/graph-3.png}
+    \captionof{figure}{\footnotesize \textbf{Định nghĩa nhiệm vụ dự đoán}. Một nhiệm vụ trên dữ liệu quan hệ được định nghĩa bằng cách gắn thêm một bảng huấn luyện vào các bảng liên kết hiện có. Một thực thể bảng huấn luyện chỉ định \textbf{(a)} nhãn thực tế được tính toán từ thông tin lịch sử \textbf{(b)} của một thực thể, và dữ liệu thời gian mà mô hình có thể sử dụng để dự đoán nhãn này \textbf{(c)}.}
+    \label{fig:training-table}
+\end{figure*}
+
+Để biểu diễn một cách tường minh các nhãn huấn luyện tương ứng với một tác vụ dự đoán cụ thể, khái niệm \textbf{bảng huấn luyện} $T_{\text{train}}$ (Hình~\ref{fig:training-table}) được định nghĩa. Mỗi bản ghi trong bảng huấn luyện tương ứng với một ví dụ huấn luyện $v = (\mathcal{K}_v, t_v, y_v)$, bao gồm ba thành phần:
+\begin{enumerate}
+\item Tập các khóa ngoại $\mathcal{K}_v$, xác định các thực thể trong cơ sở dữ liệu quan hệ mà ví dụ huấn luyện này tham chiếu tới.
+\item Một nhãn thời gian $t_v$, biểu diễn thời điểm mốc tại đó nhãn được tạo ra.
+\item Nhãn mục tiêu $y_v$, đóng vai trò là giá trị giám sát cho mô hình.
+\end{enumerate}
+
+Khác với các thiết lập học trên dữ liệu bảng truyền thống, bảng huấn luyện không lưu trữ trực tiếp các đặc trưng đầu vào $x_v$. Thay vào đó, $T_{\text{train}}$ được tích hợp vào cơ sở dữ liệu quan hệ gốc $(\mathcal{T}, \mathcal{L})$ bằng cách mở rộng tập các bảng thành $\mathcal{T} \cup {T_{\text{train}}}$ và bổ sung các mối liên kết $\mathcal{L} \cup \mathcal{L}_{T{\text{train}}}$, trong đó $\mathcal{L}_{T{\text{train}}}$ chỉ định các bảng mà các khóa $\mathcal{K}_v$ trỏ đến. Cách biểu diễn này cho phép mô hình truy xuất thông tin đầu vào một cách linh hoạt từ toàn bộ cấu trúc quan hệ hiện có.
+
+Như đã đề cập trong Mục~\ref{sec:relational_data}, việc kiểm soát chặt chẽ phạm vi thông tin mà mô hình được phép sử dụng trong quá trình huấn luyện là điều kiện tiên quyết để tránh hiện tượng \textit{rò rỉ dữ liệu theo thời gian (temporal leakage)}. Cơ chế này được đảm bảo thông qua nhãn thời gian $t_v$ trong bảng huấn luyện: khi huấn luyện mô hình để dự đoán nhãn $y_v$ tại thời điểm $t_v$, mô hình chỉ được phép khai thác thông tin từ các thực thể $u$ có nhãn thời gian $t_u \leq t_v$. (Chi tiết về quy trình lấy mẫu huấn luyện theo thời gian được trình bày trong Mục~\ref{sec:time-consistent}).
+
+Theo đó, bảng huấn luyện đảm nhiệm đồng thời hai vai trò then chốt trong quá trình học. Thứ nhất, nó xác định đầu ra huấn luyện của mô hình bằng cách chỉ rõ các thực thể mục tiêu \textit{(inputs)} và nhãn giám sát tương ứng \textit{(outputs)}. Thứ hai, đối với các tác vụ có yếu tố thời gian, bảng huấn luyện còn xác định ngữ cảnh đầu vào của mô hình thông qua việc chỉ định thời điểm mốc mà tại đó mỗi nhãn lịch sử được sinh ra. Điều này cho phép mô hình hóa một phổ rộng các bài toán dự đoán trên cơ sở dữ liệu quan hệ, bao gồm:
+\begin{itemize}
+\item \textbf{Các bài toán dự đoán ở mức thực thể (node-level prediction)}, chẳng hạn như phân loại đa lớp, phân loại đa nhãn hoặc hồi quy, trong đó bảng huấn luyện bao gồm các cột \texttt{ENTITYID}, \texttt{LABEL} và \texttt{TIME}.
+\item \textbf{Các bài toán dự đoán liên kết (link-level prediction)}, với các cột \texttt{SOURCEENTITYID}, \texttt{TARGETENTITYID}, \texttt{LABEL} và \texttt{TIME}, tương ứng với cặp thực thể nguồn–đích, nhãn mục tiêu và nhãn thời gian.
+\item \textbf{Các bài toán tĩnh và có yếu tố thời gian}, trong đó các tác vụ có tính thời gian hướng tới dự đoán tương lai và yêu cầu một thời điểm mốc xác định, còn các tác vụ phi thời gian tập trung vào suy diễn các giá trị bị thiếu và có thể lược bỏ cột \texttt{TIME}.
+\end{itemize}
+
+\textbf{Tạo bảng huấn luyện.} Bảng huấn luyện có thể được xây dựng một cách tự động thông qua các truy vấn SQL có ràng buộc thời gian trên dữ liệu lịch sử. Cụ thể, với một truy vấn mô tả mục tiêu dự đoán cho toàn bộ các thực thể, chẳng hạn như tổng doanh số bán hàng theo sản phẩm trong khoảng thời gian $[t, t+\delta]$, ta dịch chuyển thời điểm mốc $t$ lùi dần về quá khứ theo các bước cố định để thu thập tập nhãn huấn luyện, thẩm định và kiểm tra tương ứng (Hình~\ref{fig:training-table}b). Trong mỗi lần dịch chuyển, thời điểm $t$ được lưu lại như nhãn thời gian gắn với các nhãn mục tiêu được sinh ra, đảm bảo tính nhất quán về thời gian trong toàn bộ quy trình.

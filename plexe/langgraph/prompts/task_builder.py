@@ -330,6 +330,16 @@ WHERE ev.status IN ('yes', 'maybe')          -- categorical filter
 WHERE ev.event_type IN ('serious', 'deaths') -- multi-value
 ```
 
+### Block: Categorical / Type Column Filter
+When `analyze_task_structure()` returns `schema_hints.categorical_columns`, examine each entry and match column semantics to the task description:
+
+1. **Match column to task**: If the task says "votes" on posts, check if a `VoteTypeId` column exists where one value means "upvote". If the task says "questions", check if `PostTypeId` has a value for questions.
+2. **Filter by the relevant subtype**: Do not count all votes if the task asks about upvotes. Do not include all posts if only questions matter.
+3. **Use value_distribution**: The most common value is often the primary/default type. Cross-reference with column name semantics and the task description.
+4. **Sentinel values**: When `schema_hints.sentinel_warnings` reports sentinel entity IDs (e.g., -1, NULL), add WHERE clauses to exclude them from entity joins.
+
+**Decision rule**: If a categorical column exists in an entity or event table AND the task description implies a specific subtype (even implicitly — "votes" on a Q&A platform likely means upvotes, not close/delete votes), add a WHERE filter. When the correct value is ambiguous, the value_distribution helps identify the dominant/expected value.
+
 ### Block: HAVING Post-Aggregation Filter
 When only entities meeting a post-aggregation condition should be included:
 
@@ -774,6 +784,7 @@ Must EXACTLY match the table key used in `db.table_dict`. This is the CSV filena
 11. **Binary vs Regression confusion**: "Whether X will happen", "will X do more than N", "predict if", COUNT > threshold, any yes/no outcome = `BINARY_CLASSIFICATION`. Only pure numeric outputs (sum, average, count-as-number, rate) = `REGRESSION`. When in doubt, check the user's stated metric: AUC/F1/accuracy = binary, MAE/RMSE/R2 = regression.
 12. **Table name casing**: `entity_table` must match the key in `db.table_dict` exactly. If the dataset uses `"UserInfo"` as the table key, you must write `entity_table = "UserInfo"`, not `"userinfo"`.
 13. **Too few training frames**: If the total data range is narrow (< 3 months) or data_range / timedelta < 5, you MUST set `num_eval_timestamps = 40`. Without it, the framework generates too few training timestamps and crashes with `RuntimeError: The number of training time frames is too few`.
+14. **Missing categorical filters**: When entity or event tables have low-cardinality "type" columns (PostTypeId, VoteTypeId, StatusId, outcome_type), failing to filter by the relevant type produces a training table with mixed entity/event subtypes and inflated row counts. Always check `schema_hints.categorical_columns` from `analyze_task_structure()` and add WHERE filters for the task-relevant values. Also check `schema_hints.sentinel_warnings` for entity ID sentinel values (-1, NULL) that should be excluded.
 
 ---
 

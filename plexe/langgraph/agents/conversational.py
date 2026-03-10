@@ -6,6 +6,7 @@ validates inputs, and initiates the model building process.
 """
 
 import logging
+import re
 from typing import Optional, List, Dict, Any
 
 from langchain_core.tools import BaseTool
@@ -81,14 +82,55 @@ class ConversationalAgent(BaseAgent):
                     "message": "Ready to start the ML pipeline"
                 }
         
-        has_db = state.get("db_connection_string")
+        # Extract connection string from user messages if not already in state
+        if not state.get("db_connection_string"):
+            extracted_conn = self._extract_connection_string(state)
+            if extracted_conn:
+                logger.info(f"Extracted connection string from user message: {extracted_conn[:40]}...")
+                base_result["db_connection_string"] = extracted_conn
+
+        has_db = state.get("db_connection_string") or base_result.get("db_connection_string")
         has_task = any("predict" in msg.get("content", "").lower() for msg in state.get("messages", []))
         if has_db and has_task and not base_result.get("user_intent"):
             logger.info("Auto-detecting intent from state")
             base_result["user_intent"] = self._extract_intent_from_state(state)
-        
+
         return base_result
+
+    def _extract_connection_string(self, state: PipelineState) -> Optional[str]:
+        """Extract a database connection string from user messages."""
+        # Matches postgresql://, postgresql+psycopg2://, mysql://, sqlite:///,
+        # mysql+pymysql://, etc.
+        conn_pattern = re.compile(
+            r'(?:postgresql|postgres|mysql|sqlite|mssql|oracle)'
+            r'(?:\+\w+)?'
+            r'://\S+'
+        )
+        for msg in state.get("messages", []):
+            if msg.get("role") != "user":
+                continue
+            match = conn_pattern.search(msg.get("content", ""))
+            if match:
+                # Strip trailing punctuation that isn't part of the URL
+                conn = match.group(0).rstrip('.,;!?)\'"')
+                return conn
+        return None
     
+    @staticmethod
+    def _keyword_in_text(keyword: str, text: str) -> bool:
+        """Check if *keyword* appears in *text* as a whole word/phrase.
+
+        Short metric-like tokens (e.g. "roc", "auc", "mae", "r2") are
+        matched with word boundaries so that "process" does not
+        accidentally match "roc".  Multi-word phrases and longer tokens
+        use plain substring matching, which is safe.
+        """
+        # Tokens that are short AND can appear as substrings in normal
+        # English words need word-boundary matching.
+        if len(keyword) <= 4 and keyword.isalpha():
+            return bool(re.search(r'\b' + re.escape(keyword) + r'\b', text))
+        return keyword in text
+
     def _extract_intent_from_state(self, state: PipelineState) -> Dict[str, Any]:
         """Extract intent from state messages using keyword heuristics."""
         intent = {
@@ -108,7 +150,8 @@ class ConversationalAgent(BaseAgent):
             "yes or no", "probability of", "predict if", "predict whether",
             "will make any", "will do any", "whether",
             # Metric names that imply binary classification
-            "auroc", "auc", "roc", "f1 score", "f1-score", "accuracy", "precision and recall",
+            "auroc", "auc", "roc_auc", "roc-auc", "roc auc",
+            "f1 score", "f1-score", "accuracy", "precision and recall",
         ]
         link_prediction_keywords = [
             "recommend", "which items", "list of", "purchase list",
@@ -121,6 +164,8 @@ class ConversationalAgent(BaseAgent):
             "clicks", "popularity", "number of",
         ]
 
+        _match = self._keyword_in_text
+
         for msg in state.get("messages", []):
             content = msg.get("content", "")
             content_lower = content.lower()
@@ -129,26 +174,33 @@ class ConversationalAgent(BaseAgent):
 
             intent["prediction_target"] = content[:200]
 
-            # Extract user's stated evaluation metric
-            metric_map = {
-                "auroc": "AUROC", "auc": "AUC", "roc": "ROC-AUC",
-                "f1 score": "F1", "f1-score": "F1", "accuracy": "accuracy",
-                "average precision": "average_precision", "ap score": "AP",
-                "mae": "MAE", "rmse": "RMSE", "r2": "R2", "r²": "R2",
-                "mean absolute": "MAE", "root mean": "RMSE",
-                "precision@": "precision@k", "recall@": "recall@k", "map@": "MAP@k",
-            }
-            for kw, metric_name in metric_map.items():
-                if kw in content_lower:
+            # Extract user's stated evaluation metric.
+            # Order matters: longer / more specific tokens first so that
+            # e.g. "auroc" is tried before "auc".
+            metric_map = [
+                ("auroc", "AUROC"), ("roc_auc", "ROC-AUC"),
+                ("roc-auc", "ROC-AUC"), ("roc auc", "ROC-AUC"),
+                ("mean absolute", "MAE"), ("root mean", "RMSE"),
+                ("average precision", "average_precision"),
+                ("f1 score", "F1"), ("f1-score", "F1"),
+                ("accuracy", "accuracy"), ("ap score", "AP"),
+                ("mae", "MAE"), ("rmse", "RMSE"),
+                ("r2", "R2"), ("r²", "R2"),
+                ("auc", "AUC"),
+                ("precision@", "precision@k"), ("recall@", "recall@k"),
+                ("map@", "MAP@k"),
+            ]
+            for kw, metric_name in metric_map:
+                if _match(kw, content_lower):
                     intent["evaluation_metric"] = metric_name
                     break
 
             # Check classification FIRST (more specific keywords override ambiguous ones)
-            if any(kw in content_lower for kw in classification_keywords):
+            if any(_match(kw, content_lower) for kw in classification_keywords):
                 intent["task_type"] = "binary_classification"
-            elif any(kw in content_lower for kw in link_prediction_keywords):
+            elif any(_match(kw, content_lower) for kw in link_prediction_keywords):
                 intent["task_type"] = "link_prediction"
-            elif any(kw in content_lower for kw in regression_keywords):
+            elif any(_match(kw, content_lower) for kw in regression_keywords):
                 intent["task_type"] = "regression"
             # else: keep default "binary_classification"
             break

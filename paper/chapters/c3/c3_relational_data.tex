@@ -1,0 +1,27 @@
+\section{Dữ liệu Quan hệ} \label{sec:relational_data}
+
+\begin{figure*}[t]
+    \centering
+    \includegraphics[width=1.0\linewidth]{figures/graph-2.png}
+    \captionof{figure}{\footnotesize \textbf{Quy trình học sâu dựa trên quan hệ}
+    \textbf{(a)} Cho các bảng quan hệ và một nhiệm vụ dự đoán, một bảng huấn luyện, chứa thông tin nhãn được giám sát, được xây dựng và gắn vào (các) bảng thực thể. \textbf{(b)} Các bảng quan hệ chứa các thực thể riêng lẻ được liên kết bởi các mối quan hệ khóa chính-khóa ngoại. \textbf{(c)} Dữ liệu quan hệ có thể được xem như một đồ thị thực thể quan hệ duy nhất, có một nút cho mỗi thực thể và các cạnh được tạo bởi các liên kết khóa chính-khóa ngoại. \textbf{(d)} Các đặc trưng nút ban đầu được trích xuất từ mỗi hàng trong mỗi bảng bằng cách sử dụng mạng nơ-ron chuyên biệt theo phương thức. Sau đó, một mạng nơ-ron đồ thị truyền thông điệp tính toán các nhúng nút nhận biết quan hệ, một đầu mô hình tạo ra các dự đoán cho các thực thể bảng huấn luyện và các lỗi được lan truyền ngược.}
+    \label{fig:relational_data}
+\end{figure*}
+
+Một cơ sở dữ liệu quan hệ $(\mathcal{T}, \mathcal{L})$ bao gồm một tập hợp các bảng $\mathcal{T}=\{T_{1},...,T_{n}\}$, và các liên kết giữa các bảng $\mathcal{L} \subset \mathcal{T} \times \mathcal{T}$ (Hình~\ref{fig:relational_data}a). Một liên kết $L=(T_{fkey},T_{pkey}) \in \mathcal{L}$ giữa các bảng tồn tại nếu một cột khóa ngoại trong $T_{fkey}$ trỏ đến một cột khóa chính của $T_{pkey}$. Mỗi bảng là một tập hợp $T=\{v_{1},...,v_{n_{T}}\}$, mà các phần tử $v_{i} \in T$ được gọi là các hàng, hoặc các thực thể (Hình~\ref{fig:relational_data}b). Mỗi thực thể $v \in T$ bao gồm bốn thành phần cấu thành $v=(p_{v},\mathcal{K}_{v},x_{v},t_{v})$:
+
+\begin{enumerate}
+    \item \textbf{Khóa chính (Primary key)} $p_{v}$: định danh duy nhất cho thực thể $v$.
+    \item \textbf{Khóa ngoại (Foreign keys)} $\mathcal{K}_{v} \subseteq \{p_{v^{\prime}}:v^{\prime} \in T^{\prime} \text{ và } (T,T^{\prime}) \in \mathcal{L}\}$: định nghĩa các liên kết giữa phần tử $v \in T$ tới các phần tử $v^{\prime} \in T^{\prime}$, trong đó $p_{v^{\prime}}$ là khóa chính của một thực thể $v^{\prime}$ trong bảng $T^{\prime}$.
+    \item \textbf{Thuộc tính (Attributes)} $x_{v}$: chứa thông tin của thực thể.
+    \item \textbf{Nhãn thời gian (Timestamp)}: Một nhãn thời gian tùy chọn $t_{v}$, chỉ ra thời điểm một sự kiện đã xảy ra.
+    
+\end{enumerate}
+
+Ví dụ, bảng \texttt{TRANSACTIONS} (Giao dịch) trong Hình~\ref{fig:relational_data}a có khóa chính (\texttt{TRANSACTIONID}), hai khóa ngoại (\texttt{PRODUCTID} và \texttt{CUSTOMERID}), một thuộc tính (\texttt{PRICE}), và cột nhãn thời gian (\texttt{TIMESTAMP}). Tương tự, bảng \texttt{PRODUCTS} (Sản phẩm) có khóa chính (\texttt{PRODUCTID}), không có khóa ngoại, các thuộc tính (\texttt{DESCRIPTION}, \texttt{IMAGE} và \texttt{SIZE}), và không có nhãn thời gian. Sự kết nối giữa các khóa ngoại và khóa chính được thể hiện bằng các đường nối màu đen trong Hình~\ref{fig:relational_data}.
+
+Nhìn chung, các thuộc tính trong bảng $T$ chứa một bộ gồm $d_{T}$ giá trị: $x_{v}=(x_{v}^{1},...,x_{v}^{d_{T}})$. Điều quan trọng là tất cả các thực thể trong cùng một bảng đều có các cột giống nhau (các giá trị có thể bị khuyết). Ví dụ, bảng \texttt{PRODUCTS} từ Hình~\ref{fig:relational_data}a chứa ba thuộc tính khác nhau: mô tả sản phẩm (dạng văn bản), hình ảnh sản phẩm (dạng hình ảnh), và kích thước sản phẩm (dạng số). Mỗi loại dữ liệu này có các bộ mã hóa (encoders) riêng như được thảo luận trong Mục~\ref{sec:encoders}.
+
+\textbf{Bảng Dữ kiện và Bảng Chiều (Fact and Dimension Tables).} Các bảng được phân thành hai loại, bảng dữ kiện hoặc bảng chiều, với vai trò bổ sung cho nhau. Bảng dữ kiện ghi lại các tương tác giữa các thực thể khác, chẳng hạn như tất cả các lượt nhập viện của bệnh nhân, hoặc tất cả các giao dịch của khách hàng. Vì các thực thể có thể tương tác lặp đi lặp lại, các bảng dữ kiện thường chứa phần lớn các hàng trong một cơ sở dữ liệu quan hệ. Trong khi đó, các bảng chiều cung cấp thông tin ngữ cảnh, chẳng hạn như thông tin tiểu sử, thống kê vĩ mô (ví dụ: số lượng giường trong khách sạn), hoặc các thuộc tính bất biến, chẳng hạn như kích thước của một sản phẩm. Thông thường, các đặc trưng trong bảng chiều là tĩnh trong suốt vòng đời của chúng, trong khi các bảng dữ kiện thường có các thực thể được gắn nhãn thời gian.
+
+\textbf{Thời gian là thành phần cốt lõi (Temporality as a First-Class Citizen).} Dữ liệu quan hệ có tính động, liên tục tiến hóa theo thời gian cùng với sự phát sinh và ghi nhận của các sự kiện. Đặc tính này được biểu diễn thông qua nhãn thời gian (tùy chọn) $t_v$ gắn với mỗi thực thể $v$; chẳng hạn, mỗi bản ghi giao dịch trong bảng \texttt{TRANSACTIONS} đều đi kèm một mốc thời gian cụ thể. Bên cạnh đó, nhiều bài toán dự đoán trên dữ liệu quan hệ mang bản chất hướng tới tương lai, ví dụ như ước lượng mức chi tiêu của một khách hàng trong $k$ ngày tiếp theo. Do đó, yếu tố thời gian cần được mô hình hóa như một thành phần nền tảng, thay vì được xem như một thuộc tính thông thường. Khung phương pháp được trình bày trong Mục~\ref{sec:predictive_tasks_gnn} hiện thực hóa nguyên tắc này thông qua cơ chế truyền thông điệp có ràng buộc theo thời gian (tương tự~\cite{rossi2020temporal}), trong đó mỗi nút chỉ tiếp nhận thông tin từ các láng giềng có nhãn thời gian xảy ra sớm hơn, qua đó bảo toàn tính nhân quả trong quá trình học biểu diễn.

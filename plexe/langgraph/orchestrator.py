@@ -250,21 +250,27 @@ class PlexeOrchestrator:
     
     def _route_from_conversation(self, state: PipelineState) -> Literal["continue", "proceed", "end"]:
         """Route from conversation node."""
+        has_data_source = bool(state.get("db_connection_string") or state.get("csv_dir"))
         logger.debug(f"Routing from conversation: user_confirmation_required={state.get('user_confirmation_required')}, "
                     f"user_confirmed={state.get('user_confirmed')}, user_intent={state.get('user_intent')}, "
-                    f"db_connection_string={bool(state.get('db_connection_string'))}")
-        
+                    f"db_connection_string={bool(state.get('db_connection_string'))}, "
+                    f"csv_dir={bool(state.get('csv_dir'))}")
+
         if state.get("user_confirmation_required"):
             if state.get("user_confirmed"):
-                logger.info("User confirmed, proceeding to schema analysis")
-                return "proceed"
+                if has_data_source:
+                    logger.info("User confirmed with data source, proceeding to schema analysis")
+                    return "proceed"
+                else:
+                    logger.warning("User confirmed but no data source set — continuing conversation")
+                    return "continue"
             return "continue"
-        
-        if state.get("db_connection_string") or state.get("csv_dir"):
+
+        if has_data_source:
             if state.get("user_intent"):
                 logger.info("Intent detected with data source, proceeding to schema analysis")
                 return "proceed"
-        
+
         messages = state.get("messages", [])
         for msg in reversed(messages):
             if msg.get("role") == "assistant":
@@ -279,11 +285,11 @@ class PlexeOrchestrator:
                     "starting the pipeline",
                 ]
                 if any(indicator in content for indicator in ready_indicators):
-                    if state.get("db_connection_string") or state.get("csv_dir"):
+                    if has_data_source:
                         logger.info("Ready indicator found in response, proceeding")
                         return "proceed"
                 break
-        
+
         return "continue"
     
     def _route_from_schema(self, state: PipelineState) -> Literal["success", "error"]:

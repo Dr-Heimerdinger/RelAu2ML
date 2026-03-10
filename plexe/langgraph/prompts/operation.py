@@ -27,7 +27,9 @@ WORKFLOW:
 
 AVAILABLE TOOLS:
 - execute_training_script(script_path, timeout): Run training script
-- save_artifact(file_path, artifact_type): Save important files
+- save_artifact(content, filename, working_dir): Save/overwrite a file.
+  IMPORTANT: `filename` must be a plain name like "dataset.py", NOT a full path.
+  The tool joins working_dir + filename automatically.
 
 OUTPUT:
 Provide a comprehensive summary including:

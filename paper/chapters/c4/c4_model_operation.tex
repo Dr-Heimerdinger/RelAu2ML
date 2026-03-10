@@ -2,25 +2,55 @@
 \section{Giai Đoạn Mô Hình Hóa và Thực Thi}
 % =========================================================
 
-Giai đoạn cuối tập trung vào việc thiết kế kiến trúc mạng nơ-ron đồ thị và điều phối quá trình huấn luyện trong môi trường thực thi.
+Giai đoạn cuối tập trung vào việc hiện thực hóa kiến trúc mạng nơ-ron đồ thị thời gian đã trình bày trong Mục~\ref{sec:encoders}, tối ưu hóa siêu tham số, và điều phối quá trình huấn luyện trong môi trường thực thi cô lập. Giai đoạn này bao gồm hai tác tử: Tác tử Chuyên gia GNN ($\mathcal{A}_{gnn}$) lựa chọn siêu tham số và sinh kịch bản huấn luyện, và Tác tử Vận hành ($\mathcal{A}_{ops}$) thực thi kịch bản trong tiến trình con có giám sát.
 
 \subsection{Tác Tử Chuyên Gia GNN ($\mathcal{A}_{gnn}$, Relational GNN Specialist Agent)}
 
-Tác tử Chuyên gia GNN $\mathcal{A}_{gnn}$ nhận đầu vào là định nghĩa bài toán và cấu trúc đồ thị $\mathcal{G}$, từ đó thiết kế kiến trúc mô hình và sinh kịch bản huấn luyện hoàn chỉnh.
+Tác tử Chuyên gia GNN $\mathcal{A}_{gnn}$ nhận đầu vào là định nghĩa bài toán từ $\mathcal{S}_{spec}$ (bao gồm \texttt{DatasetInfo} và \texttt{TaskInfo}) cùng cấu trúc đồ thị $\mathcal{G}$, từ đó lựa chọn siêu tham số tối ưu và sinh kịch bản huấn luyện hoàn chỉnh. Điểm khác biệt cốt lõi của $\mathcal{A}_{gnn}$ so với các hệ thống tối ưu siêu tham số truyền thống (ví dụ, Bayesian Optimization trong Auto-sklearn~\cite{feurer2015autosklearn} hay ASHA trong Ray Tune~\cite{liaw2018tune}) nằm ở cơ chế \textit{tối ưu siêu tham số không cần huấn luyện} (training-free hyperparameter optimization) thông qua giao thức Model Context Protocol (MCP).
 
-\paragraph{Cơ chế hoạt động.}
-$\mathcal{A}_{gnn}$ phân tích các tính chất của đồ thị không đồng nhất $\mathcal{G}$ --- bao gồm số lượng kiểu nút, kiểu cạnh, và phân phối bậc --- để lựa chọn các lớp truyền thông điệp (message passing layers) phù hợp. Kịch bản huấn luyện được sinh ra bao gồm các thành phần sau:
+\paragraph{Tối ưu siêu tham số qua MCP.}
+Thay vì thực hiện huấn luyện thử nghiệm lặp đi lặp lại để đánh giá các cấu hình siêu tham số --- phương pháp tốn kém tài nguyên tính toán --- $\mathcal{A}_{gnn}$ truy vấn năm nguồn tri thức bên ngoài thông qua các máy chủ MCP. Mỗi máy chủ cung cấp một góc nhìn khác nhau về không gian siêu tham số:
+
+\begin{enumerate}
+    \item \textbf{Máy chủ hpo-search} (\textit{heuristic-based}): Cung cấp bộ siêu tham số dựa trên quy tắc suy luận, nhận đầu vào là đặc tính bài toán (\texttt{task\_type}, \texttt{num\_nodes}, \texttt{num\_tables}, \texttt{is\_temporal}) và trả về cấu hình phù hợp.
+    \item \textbf{Máy chủ google-scholar}: Trích xuất siêu tham số từ các bài báo khoa học trên Google Scholar thông qua công cụ \texttt{search\_gnn\_papers\_for\_hyperparameters}, lọc theo loại tác vụ và kiến trúc mô hình.
+    \item \textbf{Máy chủ arxiv}: Tìm kiếm các bản tiền ấn (preprints) trên arXiv với truy vấn liên quan đến kiến trúc GNN và loại tác vụ cụ thể.
+    \item \textbf{Máy chủ semantic-scholar}: Tìm kiếm bài báo kèm chỉ số trích dẫn, cho phép ưu tiên các cấu hình từ nghiên cứu có ảnh hưởng cao.
+    \item \textbf{Máy chủ kaggle}: Truy xuất hai nguồn thực nghiệm: (i)~giải pháp chiến thắng từ các cuộc thi (\texttt{search\_gnn\_competitions\_for\_benchmarks}), và (ii)~các notebook có xếp hạng cao chứa cấu hình đã được kiểm chứng (\texttt{search\_gnn\_notebooks\_for\_hyperparameters}).
+\end{enumerate}
+
+Sau khi thu thập kết quả từ các nguồn trên, $\mathcal{A}_{gnn}$ sử dụng công cụ \texttt{compare\_hyperparameter\_configs} (từ máy chủ hpo-search) để tổng hợp các cấu hình theo chiến lược bỏ phiếu trung vị (\textit{ensemble median voting}): với mỗi siêu tham số, hệ thống lấy giá trị trung vị từ tập các đề xuất, giảm thiểu ảnh hưởng của các giá trị ngoại lai từ một nguồn đơn lẻ.
+
+Toàn bộ quá trình truy vấn MCP được bảo vệ bởi cơ chế \texttt{CircuitBreaker}: sau ba lần thất bại liên tiếp đối với một công cụ cụ thể, mạch bảo vệ mở ra và từ chối các lời gọi tiếp theo trong 300 giây, tránh tình trạng chờ đợi kéo dài khi máy chủ MCP không khả dụng. Trong trường hợp tất cả các nguồn MCP không khả dụng, $\mathcal{A}_{gnn}$ quay về sử dụng bộ siêu tham số mặc định (ví dụ: \texttt{hidden\_channels}$=128$, \texttt{num\_gnn\_layers}$=2$, \texttt{learning\_rate}$=0.005$, \texttt{batch\_size}$=512$, \texttt{epochs}$=10$).
+
+\paragraph{Lựa chọn độ đo đánh giá.}
+$\mathcal{A}_{gnn}$ áp dụng quy tắc ưu tiên hai bước để xác định độ đo tối ưu hóa (\texttt{tune\_metric}). Bước thứ nhất: nếu người dùng chỉ định một độ đo cụ thể trong yêu cầu ban đầu (thông qua trường \texttt{evaluation\_metric} trong $\mathcal{S}_{spec}$), hệ thống sử dụng độ đo đó mà không thay đổi. Bước thứ hai: nếu không có yêu cầu cụ thể, hệ thống áp dụng bảng ánh xạ mặc định theo loại tác vụ --- \texttt{mae} cho bài toán hồi quy, \texttt{average\_precision} cho phân loại nhị phân, \texttt{accuracy} cho phân loại đa lớp, và \texttt{link\_prediction\_map} cho dự đoán liên kết. Các tên gọi phổ biến (ví dụ: ``AUROC'', ``AUC'', ``F1 score'') được chuẩn hóa về tên hàm nội bộ thông qua bảng ánh xạ biệt danh (\texttt{METRIC\_NAME\_MAP}).
+
+\paragraph{Sinh kịch bản huấn luyện.}
+Sau khi xác định bộ siêu tham số, $\mathcal{A}_{gnn}$ gọi công cụ \texttt{generate\_training\_script} để sinh tệp \texttt{train\_script.py} hoàn chỉnh. Công cụ này sử dụng một khuôn mẫu mã (code template) cố định, tuân thủ quy trình huấn luyện tham chiếu của RelBench~\cite{robinson2024relbench}, với các siêu tham số đã chọn được nhúng trực tiếp vào mã. Kịch bản được sinh hiện thực hóa kiến trúc GNN thời gian ba thành phần (\textit{encoder -- temporal -- message passing -- head}) đã mô tả trong Mục~\ref{sec:encoders}:
 
 \begin{itemize}
-    \item Khởi tạo mô hình với kiến trúc đã chọn.
-    \item Cấu hình hàm mất mát $\mathcal{L}$ tương ứng với loại bài toán (phân loại hoặc hồi quy).
-    \item Lựa chọn thuật toán tối ưu (optimizer) và lịch điều chỉnh tốc độ học (learning rate scheduler).
-    \item Định nghĩa các độ đo đánh giá hiệu năng $\mathcal{M} = \{m_1, m_2, \ldots\}$.
+    \item \textbf{HeteroEncoder}: Mã hóa đặc trưng nút dựa trên PyTorch Frame~\cite{hu2024pytorchframe}. Mỗi kiểu nút có một mô hình ResNet riêng biệt, nhận đầu vào là \texttt{TensorFrame} chứa các cột đã được mã hóa theo kiểu dữ liệu (\texttt{stype}), và xuất ra biểu diễn $\mathbf{h}_v \in \mathbb{R}^d$ với $d$ là số kênh ẩn (\texttt{hidden\_channels}).
+    \item \textbf{HeteroTemporalEncoder}: Mã hóa thông tin thời gian tương đối giữa nút và thời điểm tham chiếu (seed time). Khoảng cách thời gian tuyệt đối được chuyển đổi sang đơn vị ngày, sau đó biến đổi qua lớp \texttt{PositionalEncoding} và một phép chiếu tuyến tính. Kết quả được cộng vào biểu diễn nút, cho phép mô hình phân biệt các sự kiện gần đây và sự kiện lâu trước.
+    \item \textbf{HeteroGraphSAGE}: Mạng truyền thông điệp trên đồ thị không đồng nhất, sử dụng \texttt{SAGEConv}~\cite{hamilton2017inductive} cho mỗi kiểu cạnh thông qua \texttt{HeteroConv} của PyTorch Geometric~\cite{fey2019fast}. Mỗi lớp GNN thực hiện chuẩn hóa lớp (\texttt{LayerNorm}) theo nút và kích hoạt ReLU. Số lớp GNN (\texttt{num\_gnn\_layers}) xác định phạm vi tổng hợp thông tin lân cận trên đồ thị.
+    \item \textbf{Đầu dự đoán (MLP head)}: Một mạng perceptron đa lớp (\texttt{MLP} của PyTorch Geometric) với chuẩn hóa batch, nhận biểu diễn nút thực thể đích và xuất ra dự đoán tương ứng với loại tác vụ.
 \end{itemize}
+
+Ngoài kiến trúc mô hình, kịch bản sinh còn bao gồm: cấu hình hàm mất mát $\mathcal{L}$ (BCEWithLogitsLoss cho phân loại nhị phân, CrossEntropyLoss cho phân loại đa lớp, L1Loss cho hồi quy), thuật toán tối ưu Adam, bộ nạp dữ liệu đồ thị (\texttt{NeighborLoader} với \texttt{temporal\_strategy="uniform"} --- hiện thực hóa Thuật toán~\ref{alg:computation_graph} trong Mục~\ref{sec:time-consistent}), vòng lặp huấn luyện với lưu mô hình tốt nhất dựa trên độ đo trên tập kiểm định, và ghi kết quả đánh giá cuối cùng ra tệp \texttt{training\_results.json}.
+
+Thiết kế sử dụng khuôn mẫu mã cố định --- thay vì để LLM tự sinh toàn bộ mã huấn luyện --- là một quyết định có chủ đích nhằm đảm bảo tính đúng đắn: system prompt của $\mathcal{A}_{gnn}$ cấm tác tử viết kịch bản huấn luyện thủ công và yêu cầu sử dụng công cụ \texttt{generate\_training\_script}. Điều này loại bỏ rủi ro LLM sinh ra mã huấn luyện có lỗi logic tinh vi (ví dụ: rò rỉ dữ liệu, sai thứ tự đánh giá, hoặc thiếu bước lưu mô hình).
 
 \subsection{Tác Tử Vận Hành ($\mathcal{A}_{ops}$, Operation Agent)}
 
-Tác tử Vận hành $\mathcal{A}_{ops}$ quản lý môi trường thực thi và điều phối việc thi hành các đoạn mã do các tác tử trước sinh ra.
+Tác tử Vận hành $\mathcal{A}_{ops}$ quản lý môi trường thực thi và điều phối việc thi hành kịch bản huấn luyện do $\mathcal{A}_{gnn}$ sinh ra.
 
-\paragraph{Cơ chế hoạt động.}
-$\mathcal{A}_{ops}$ khởi tạo quy trình thực thi cô lập, nạp dữ liệu đồ thị $\mathcal{G}$ và bảng huấn luyện $\mathcal{D}_{train}$, sau đó thực hiện vòng lặp huấn luyện. Trong suốt quá trình này, tác tử giám sát đồng thời luồng đầu ra chuẩn và luồng lỗi chuẩn. Khi quá trình hoàn tất, các kết quả đánh giá $\mathcal{M}$ được trích xuất và ghi vào $\mathcal{S}_{exec}$ để tổng hợp báo cáo cho người dùng.
+\paragraph{Cơ chế thực thi.}
+$\mathcal{A}_{ops}$ khởi tạo một tiến trình con (\texttt{subprocess}) cô lập thông qua công cụ \texttt{execute\_training\_script}. Trước khi thực thi, công cụ thực hiện bước tiền xử lý mã (\texttt{\_patch\_broken\_imports}): LLM đôi khi sinh ra các câu lệnh import sử dụng đường dẫn tuyệt đối của thư mục làm việc (ví dụ: \texttt{from workdir.session\_xxx.dataset import GenDataset} thay vì \texttt{from dataset import GenDataset}); hàm tiền xử lý phát hiện và sửa các mẫu import này bằng biểu thức chính quy trước khi kịch bản được thực thi.
+
+Tiến trình con được cấu hình với biến môi trường \texttt{PYTHONPATH} bao gồm cả thư mục làm việc và thư mục gốc của dự án, đảm bảo các module nội bộ (\texttt{plexe.relbench.modeling}) có thể được import. Quá trình thực thi có giới hạn thời gian tối đa (\texttt{timeout}, mặc định 3600 giây). Cả luồng đầu ra chuẩn (\texttt{stdout}) và luồng lỗi chuẩn (\texttt{stderr}) đều được thu thập để phục vụ phân tích kết quả hoặc chẩn đoán lỗi.
+
+\paragraph{Trích xuất và tổng hợp kết quả.}
+Khi quá trình huấn luyện hoàn tất, $\mathcal{A}_{ops}$ đọc tệp \texttt{training\_results.json} từ thư mục làm việc. Tệp này chứa các kết quả đánh giá trên tập kiểm định và tập kiểm thử dưới dạng từ điển độ đo $\mathcal{M}$, đường dẫn đến mô hình đã lưu (\texttt{best\_model.pt}), và độ đo tối ưu hóa cùng giá trị tốt nhất đạt được. Các kết quả này được ghi vào $\mathcal{S}_{exec}$ (trường \texttt{training\_result}) và trạng thái pipeline chuyển sang pha \texttt{COMPLETED}.
+
+\paragraph{Sản phẩm đầu ra.}
+Khi pipeline hoàn tất, $\mathcal{A}_{ops}$ tổng hợp báo cáo cho người dùng, bao gồm danh sách các sản phẩm đã được sinh ra: \texttt{dataset.py} (định nghĩa đồ thị), \texttt{task.py} (định nghĩa tác vụ), \texttt{train\_script.py} (kịch bản huấn luyện), \texttt{best\_model.pt} (trọng số mô hình đã huấn luyện), và \texttt{training\_results.json} (kết quả đánh giá). Ngoài ra, tác tử sinh mã suy luận (\texttt{inference code}) cho phép người dùng nạp mô hình đã huấn luyện và thực hiện dự đoán trên dữ liệu mới.

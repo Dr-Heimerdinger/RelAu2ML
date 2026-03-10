@@ -1,0 +1,122 @@
+\section{Các Tác vụ Dự đoán dưới dạng Bài toán Học Biểu diễn Đồ thị} \label{sec:predictive_tasks_gnn}
+\begin{figure*}
+    \centering
+    \includegraphics[width=1.0\linewidth]{figures/graph-4.png}
+    \captionof{figure}{\footnotesize \textbf{Ba loại đồ thị khác nhau. (a)} Đồ thị lược đồ phát sinh từ các bảng quan hệ đã cho. Mỗi nút biểu thị một bảng, và một cạnh giữa các bảng cho biết khóa chính trong bảng này là khóa ngoại trong bảng kia. \textbf{(b)} Đồ thị thực thể có một nút cho mỗi thực thể trong mỗi bảng, và các cạnh được tạo bởi các liên kết khóa chính-khóa ngoại. Đồ thị thực thể không đồng nhất với các loại nút và cạnh được xác định bởi đồ thị lược đồ. Các nút có dấu thời gian (minh họa bằng mũi tên thời gian), bắt nguồn từ cột dấu thời gian của bảng. \textbf{(c)} Sử dụng chiến lược lấy mẫu theo thời gian và mô tả nhiệm vụ dưới dạng bảng huấn luyện chứa các thời gian khác nhau, chúng ta thu được các \textit{đồ thị tính toán nhất quán theo thời gian} làm ví dụ huấn luyện, tự nhiên tuân thủ thứ tự thời gian và ánh xạ tốt với tính toán song song.}
+    \label{fig:three-graph}
+\end{figure*}
+Phần này trình bày cách mô hình hóa các tác vụ dự đoán trên cơ sở dữ liệu quan hệ như các bài toán học biểu diễn đồ thị, thông qua một kiến trúc mạng nơ-ron đồ thị (Graph Neural Network - GNN) tổng quát. Trước hết, ba khái niệm đồ thị trung tâm trong khuôn khổ đề xuất được giới thiệu, như minh họa trong Hình~\ref{fig:three-graph}:
+\begin{enumerate}
+\item[(a)] \textbf{Đồ thị Lược đồ (Schema Graph)} (Mục~\ref{sec:schema-graph}), mô tả cấu trúc dữ liệu ở cấp độ bảng, trong đó mỗi bảng tương ứng với một nút.
+\item[(b)] \textbf{Đồ thị Thực thể Quan hệ (Relational Entity Graph)} (Mục~\ref{sec:relation-graph}), một đồ thị ở cấp độ thực thể, với mỗi hàng trong mỗi bảng được biểu diễn như một nút, và các cạnh được xác định thông qua các quan hệ khóa ngoại-khóa chính.
+\item[(c)] \textbf{Đồ thị Tính toán Nhất quán theo Thời gian (Time-Consistent Computation Graph)} (Mục~\ref{sec:time-consistent}), đóng vai trò là biểu diễn huấn luyện tường minh cho các mô hình GNN.
+\end{enumerate}
+
+\subsection{Đồ thị Lược đồ (Schema Graph)} \label{sec:schema-graph}
+Đồ thị lược đồ mô tả cấu trúc của cơ sở dữ liệu quan hệ ở cấp độ bảng (Hình~\ref{fig:three-graph}a). Với một cơ sở dữ liệu quan hệ $(\mathcal{T}, \mathcal{L})$ như đã định nghĩa trong Mục~\ref{sec:relational_data}, ký hiệu $\mathcal{L}^{-1}=\{(T_{\text{pkey}},T_{\text{fkey}})\mid(T_{\text{fkey}},T_{\text{pkey}})\in\mathcal{L}\}$ biểu diễn tập các liên kết nghịch đảo. Đồ thị lược đồ khi đó được xác định là $(\mathcal{T}, \mathcal{R})$, với tập nút $\mathcal{T}$ và tập cạnh $\mathcal{R}=\mathcal{L}\cup\mathcal{L}^{-1}$. Việc bổ sung các liên kết nghịch đảo đảm bảo khả năng truy cập hai chiều giữa các bảng trong đồ thị.Các nút trong đồ thị lược đồ đóng vai trò như các định nghĩa kiểu (type definitions), làm cơ sở cho việc xây dựng đồ thị thực thể quan hệ dị thể được trình bày tiếp theo.
+
+\subsection{Đồ thị Thực thể Quan hệ (Relational Entity Graph)} \label{sec:relation-graph}
+\textit{Đồ thị thực thể quan hệ} được xây dựng nhằm cung cấp một biểu diễn đồ thị phù hợp cho việc xử lý bằng các mô hình GNN, với các nút ở cấp độ thực thể và đóng vai trò là cấu trúc trung tâm của khung phương pháp. Cụ thể, đồ thị thực thể quan hệ là một \textit{đồ thị dị thể} $G=(\mathcal{V},\mathcal{E},\phi,\psi)$, trong đó $\mathcal{V}$ là tập nút, $\mathcal{E}\subseteq\mathcal{V}\times\mathcal{V}$ là tập cạnh, $\phi:\mathcal{V}\rightarrow\mathcal{T}$ là hàm ánh xạ loại nút và $\psi:\mathcal{E}\rightarrow\mathcal{R}$ là hàm ánh xạ loại cạnh. Mỗi nút $v\in\mathcal{V}$ được gán một loại $\phi(v)\in\mathcal{T}$, và mỗi cạnh $e\in\mathcal{E}$ được gán một loại $\psi(e)\in\mathcal{R}$, trong đó các tập $\mathcal{T}$ và $\mathcal{R}$ được thừa hưởng trực tiếp từ đồ thị lược đồ.
+
+Với mỗi bảng $T=\{v_{1},\dots,v_{n_T}\}\in\mathcal{T}$, tập nút của đồ thị thực thể quan hệ được xác định là $\mathcal{V}=\bigcup_{T\in\mathcal{T}}T$. Tập cạnh được xác định bởi:
+\begin{equation}
+\mathcal{E}=\{(v_1,v_2)\in\mathcal{V}\times\mathcal{V}\mid p_{v_2}\in\mathcal{K}{v_1}\ \text{hoặc}\ p{v_1}\in\mathcal{K}_{v_2}\},
+\end{equation}
+tương ứng với các quan hệ khóa chính-khóa ngoại giữa các thực thể trong cơ sở dữ liệu.
+
+Đồ thị thực thể quan hệ bao hàm các thông tin sau:
+\begin{itemize}
+\item \textbf{Hàm ánh xạ loại (Type mapping functions)} $\phi$ và $\psi$, cho phép biểu diễn tính dị thể của đồ thị.
+\item \textbf{Hàm ánh xạ thời gian (Time mapping function)} $\tau:\mathcal{V}\rightarrow\mathcal{D}$, ánh xạ mỗi nút tới nhãn thời gian $t_v$ (Mục~\ref{sec:relational_data}), trong đó $\tau(v)$ biểu thị thời điểm bản ghi tương ứng trở nên khả dụng.
+\item \textbf{Vector nhúng nút (Embedding vectors)} $h_v\in\mathbb{R}^{d_{\phi(v)}}$, đại diện cho biểu diễn học được của mỗi thực thể, với các nhúng ban đầu được sinh ra từ các bộ mã hóa cột và các nhúng cuối cùng được tính toán thông qua GNN.
+\end{itemize}
+
+\subsection{Đồ thị tính toán nhất quán theo thời gian} \label{sec:time-consistent}
+Với một đồ thị thực thể quan hệ và một bảng huấn luyện (Mục~\ref{sec:task_to_training_table}), chúng ta cần có khả năng trích xuất các đồ thị con tại những thời điểm mốc cụ thể, đóng vai trò là các ví dụ huấn luyện tường minh. Mỗi đồ thị con được xác định bởi tập khóa ngoại $\mathcal{K}_v$ và nhãn thời gian $t_v$ của một bản ghi trong bảng huấn luyện $T_{\text{train}}$, từ đó hình thành một \textit{đồ thị tính toán cục bộ, nhất quán theo thời gian để dự đoán nhãn} $y_v$. Các đồ thị tính toán này được sinh thông qua kỹ thuật lấy mẫu láng giềng \cite{hamilton2017inductive}, cho phép mở rộng phương pháp tới các cơ sở dữ liệu quan hệ quy mô lớn trong khi vẫn đảm bảo các ràng buộc về nhân quả theo thời gian \cite{wang2021time}.
+
+Với số lượng bước nhảy $L$ cần lấy mẫu, một nút hạt giống (seed node) $v \in \mathcal{V}$, và một nhãn thời gian $t$ được xác định bởi một ví dụ huấn luyện, đồ thị tính toán được định nghĩa là $G_{comp}=(\mathcal{V}_{comp},\mathcal{E}_{comp})$ như là đầu ra của Thuật toán \ref{alg:computation_graph}. Thuật toán duyệt qua đồ thị bắt đầu từ nút hạt giống $v$ trong $L$ lần lặp. Trong lần lặp thứ $i$, nó thu thập tối đa $m_{i}$ láng giềng khả dụng tính đến thời điểm $t$, sử dụng một trong ba chiến lược sau:
+\begin{itemize}
+    \item \textbf{Lấy mẫu thời gian đồng nhất (Uniform temporal sampling)}: chọn các láng giềng ngẫu nhiên được lấy mẫu đồng nhất.
+    \item \textbf{Lấy mẫu thời gian có sắp xếp (Ordered temporal sampling)}: lấy các láng giềng mới nhất, được sắp xếp theo thời gian $\tau$.
+    \item \textbf{Lấy mẫu thời gian có trọng số (Biased temporal sampling)}: chọn các láng giềng ngẫu nhiên được lấy mẫu từ một phân phối xác suất đa thức (multinomial probability distribution) được cảm sinh bởi $\tau$. Ví dụ, việc lấy mẫu có thể được thực hiện tỷ lệ thuận với thời gian tương đối của láng giềng hoặc thiên về các khoảnh khắc lịch sử quan trọng cụ thể.
+\end{itemize}
+\begin{algorithm}
+\caption{Đồ thị Tính toán Nhất quán theo Thời gian}
+\label{alg:computation_graph}
+\begin{algorithmic}[1]
+\State \textbf{Input:} Đồ thị thực thể quan hệ $G=(\mathcal{V},\mathcal{E})$, số bước nhảy $L$, nút hạt giống $v_{0}\in\mathcal{V}$, thời điểm mốc $t\in\mathbb{R}$
+\State \textbf{Input:} Kích thước lân cận $(m_{1},...,m_{L})\in\mathbb{N}^{L}$
+\State \textbf{Output:} Đồ thị tính toán $G_{\text{comp}}=(\mathcal{V}_{\text{comp}},\mathcal{E}_{\text{comp}})$
+\State $\mathcal{V}_{0}\leftarrow\{v_{0}\}$, $\mathcal{E}_{0}\leftarrow\emptyset$
+\State \textbf{for} $i \in \{1,...,L\}$ \textbf{do}
+\State \quad \textbf{for} $v \in \mathcal{V}_{i-1}$ \textbf{do}
+\State \quad \quad $\mathcal{E}_{i} \leftarrow \text{SELECT}_{m_{i}}(\{(w,v)\in\mathcal{E} \mid \tau(v)\le t\})$ \quad $\triangleright$ Chọn tối đa $m_i$ cạnh đã lọc
+\State \quad \quad $\mathcal{V}_{i} \leftarrow \{w\in\mathcal{V} \mid (w,v)\in\mathcal{E}_{i}\}$ \quad $\triangleright$ Thu thập các nút cho các cạnh đã lấy mẫu
+\State \quad \textbf{end for}
+\State \textbf{end for}
+\State$\mathcal{V}_{\text{comp}} \leftarrow \bigcup_{i=1}^{L}\mathcal{V}_{i}$, \quad $\mathcal{E}_{\text{comp}} \leftarrow \bigcup_{i=1}^{L}\mathcal{E}_{i}$
+\end{algorithmic}
+\end{algorithm}
+
+Việc lấy mẫu láng giềng theo thời gian được thực hiện trên cấu trúc đồ thị của đồ thị thực thể quan hệ mà không yêu cầu các nhúng ban đầu $h_{v}^{(0)}$. Kích thước bị giới hạn của đồ thị tính toán $G_{comp}$ cho phép xử lý theo lô nhỏ (mini-batching) hiệu quả trên GPU, độc lập với kích thước của đồ thị thực thể quan hệ.
+
+\subsection{Mạng Nơ-ron Đồ thị Thời gian cho Các Tác vụ Cụ thể} \label{sec:encoders}
+Dựa trên đồ thị tính toán nhất quán theo thời gian, một kiến trúc học sâu đa giai đoạn được sử dụng cho các tác vụ dự đoán, bao gồm:
+\begin{enumerate}
+\item Các bộ \textbf{mã hóa cột} ở cấp độ bảng, ánh xạ dữ liệu hàng bảng thành các nút nhúng (node embeddings) ban đầu $h_v^{(0)}$.
+\item Một ngăn xếp gồm $L$ \textbf{lớp truyền thông điệp quan hệ-thời gian}.
+\item Một \textbf{đầu mô hình (model head)} đặc thù cho từng tác vụ, ánh xạ nhúng nút cuối cùng thành dự đoán.
+\end{enumerate}
+
+\textbf{Truyền thông điệp quan hệ-thời gian.}
+Toán tử truyền thông điệp được thiết kế để chú ý cả tính dị thể lẫn đặc tính thời gian của đồ thị, dựa trên các phương pháp truyền thông điệp dị thể hiện có \cite{gilmer2017neural,fey2019fast,schlichtkrull2018modeling,hu2020heterogeneous}, kết hợp với cơ chế lọc theo thời gian. Luồng thông tin giữa các nút chỉ được phép diễn ra theo chiều thời gian tăng dần, được đảm bảo thông qua chiến lược lấy mẫu láng giềng có ràng buộc thời gian thông qua cách làm được trình bày cụ thể bên dưới.
+
+Mạng Nơ-ron Đồ Thị Truyền Thông Điệp (MP-GNN) \cite{gilmer2017neural, fey2019fast} là một khung tính toán tổng quát để định nghĩa các kiến trúc học sâu trên dữ liệu có cấu trúc đồ thị. Cho một đồ thị dị thể $G = (V, E, \phi, \psi)$ với các embedding nút ban đầu $\{h_v^{(0)}\}_{v \in V}$, một lần lặp truyền thông điệp tính toán các đặc trưng cập nhật $\{h_v^{(i+1)}\}_{v \in V}$ từ các đặc trưng $\{h_v^{(i)}\}_{v \in V}$ được cho bởi lần lặp trước đó. Một lần lặp có dạng:
+
+\begin{equation}
+h_v^{(i+1)} = f\left(h_v^{(i)}, \{\!\!\{g(h_w^{(i)}) \mid w \in \mathcal{N}(v)\}\!\!\}\right),
+\label{eq:ct1}
+\end{equation}
+
+trong đó $f$ và $g$ là các hàm khả vi tùy ý với các tham số có thể tối ưu hóa và $\{\!\!\{\cdot\}\!\!\}$ là một bộ tổng hợp tập hợp bất biến hoán vị, chẳng hạn như mean, max, sum hoặc một tổ hợp của chúng.
+
+Truyền thông điệp dị thể \cite{schlichtkrull2018modeling, hu2020heterogeneous} là một phiên bản lồng nhau của phương trình (\ref{eq:ct1}), bổ sung một phép tổng hợp trên tất cả các loại cạnh đầu vào để học các loại thông điệp khác biệt:
+
+\begin{equation}
+\label{eq:ct2}
+h_v^{(i+1)} = f_{\phi(v)}\left(h_v^{(i)}, \left\{\!\!\left\{f_R\left(\{\!\!\{g_R(h_w^{(i)}) \mid w \in \mathcal{N}_R(v)\}\!\!\}\right) \mid \forall R = (T, \phi(v)) \in \mathcal{R}\right\}\!\!\right\}\right),
+\end{equation}
+
+trong đó $\mathcal{N}_R(v) = \{w \in V \mid (w,v) \in E \text{ và } \psi(w,v) = R\}$ biểu thị láng giềng đặc thù của loại $R$ của nút $v \in V$. Công thức này hỗ trợ nhiều toán tử mạng nơ-ron đồ thị khác nhau, định nghĩa dạng cụ thể của các hàm $f_{\phi(v)}$, $f_R$, $g_R$ và $\{\!\!\{\cdot\}\!\!\}$ \cite{fey2019fast}.
+
+\subsection*{Truyền Thông Điệp Thời Gian}
+
+Cho một đồ thị thực thể quan hệ $G = (V, E, \mathcal{T}, \mathcal{R})$ với các hàm ánh xạ đính kèm $\psi$, $\phi$, $\tau$ và các embedding nút ban đầu $\{h_v^{(0)}\}_{v \in V}$ cùng một thời điểm khởi tạo đặc thù cho ví dụ $t \in \mathbb{R}$ (Mục~\ref{sec:task_to_training_table}), chúng ta thu được một tập hợp các embedding nút sâu $\{h_v^{(L)}\}_{v \in V}$ bằng $L$ lần áp dụng liên tiếp của phương trình (\ref{eq:ct2}), trong đó bổ sung lọc các láng giềng đặc thù của loại $R$ dựa trên dấu thời gian của chúng, tức là thay thế $\mathcal{N}_R(v)$ bằng:
+
+\begin{equation}
+\mathcal{N}_R^{\leq t}(v) = \{w \in V \mid (w,v) \in E, \psi(w,v) = R, \text{ và } \tau(w) \leq t\},
+\end{equation}
+
+được thực hiện bởi quy trình lấy mẫu thời gian được trình bày trong Mục~\ref{sec:time-consistent}. Công thức này đảm bảo thời gian một cách tự nhiên bằng cách chỉ tổng hợp các thông điệp từ các nút có sẵn trước thời điểm khởi tạo đã cho $s$. Công thức đã cho là bất khả tri đối với các triển khai cụ thể của truyền thông điệp và hỗ trợ nhiều toán tử khác nhau.
+
+\textbf{Dự đoán với các đầu mô hình.}
+Mô hình được mô tả cho đến nay là bất khả tri tác vụ và đơn giản chỉ truyền thông tin qua đồ thị thực thể quan hệ để tạo ra các embedding nút. Một mô hình đặc thù cho tác vụ thu được bằng cách kết hợp đồ thị có được qua quá trình xây dựng với một bảng huấn luyện, dẫn đến đòi hỏi các đầu mô hình cụ thể và các hàm mất mát phù hợp. Nội dung trước đó phân biệt giữa (nhưng không giới hạn) hai loại tác vụ: dự đoán cấp độ nút và dự đoán cấp độ liên kết.
+
+\paragraph{Đầu Mô Hình Cấp Độ Nút (Node-level Model Head).}
+Cho một batch gồm $N$ ví dụ bảng huấn luyện cấp độ nút $\{(\mathcal{K}, t, y)_i\}_{i=1}^N$ (xem Mục 2.2), trong đó $\mathcal{K} = \{k\}$ chứa khóa chính của nút $v \in V$ trong đồ thị thực thể quan hệ, $t \in \mathbb{R}$ là thời điểm khởi tạo, và $y \in \mathbb{R}^d$ là giá trị mục tiêu. Khi đó, đầu mô hình cấp độ nút ánh xạ các embedding cấp độ nút $h_v^{(L)}$ thành một dự đoán $\hat{y}$, tức là:
+
+\begin{equation}
+f : \mathbb{R}^{d_v} \rightarrow \mathbb{R}^d, \quad f : h_v^{(L)} \mapsto \hat{y}.
+\end{equation}
+
+\paragraph{Đầu Mô Hình Cấp Độ Liên Kết (Link-level Model Head).}
+Tương tự, chúng ta có thể định nghĩa một đầu mô hình cấp độ liên kết cho các ví dụ huấn luyện $\{(\mathcal{K}, t, y)_i\}_{i=1}^N$ với $\mathcal{K} = \{k_1, k_2\}$ chứa các khóa chính của hai nút khác nhau $v_1, v_2 \in V$ trong đồ thị thực thể quan hệ. Một hàm ánh xạ các embedding nút $h_{v_1}^{(L)}$, $h_{v_2}^{(L)}$ thành một dự đoán, tức là:
+
+\begin{equation}
+f : \mathbb{R}^{d_{v_1}} \times \mathbb{R}^{d_{v_2}} \rightarrow \mathbb{R}^d, \quad f : (h_{v_1}^{(L)}, h_{v_2}^{(L)}) \mapsto \hat{y}.
+\end{equation}
+
+Một hàm mất mát đặc thù cho tác vụ $L(\hat{y}, y)$ cung cấp các tín hiệu đạo hàm cho tất cả các tham số có thể huấn luyện. Cách tiếp cận được trình bày có thể được tổng quát hóa cho $|\mathcal{K}| > 2$ để chỉ định các tác vụ cấp độ đồ thị con.
+
+\textbf{Các bộ mã hóa nút đa phương thức.}
+Phần cuối cùng của quy trình là thu được các embedding nút cấp độ thực thể ban đầu $h_v^{(0)}$ từ các thuộc tính đầu vào đa phương thức $x_v = (x_v^1, \ldots, x_v^{d_T})$. Do bản chất của dữ liệu dạng bảng, mỗi phần tử cột $x_v^i$ nằm trong không gian phương thức riêng của nó, chẳng hạn như ảnh, văn bản, giá trị phân loại và giá trị số. Do đó, cần sử dụng các bộ mã hóa đặc thù cho phương thức đã được tiền huấn luyện để nhúng mỗi thuộc tính thành các embedding, và hợp nhất các embedding cấp độ cột thành một embedding duy nhất cho mỗi hàng.

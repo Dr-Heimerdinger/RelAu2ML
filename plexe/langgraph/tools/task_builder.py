@@ -323,10 +323,112 @@ def analyze_task_structure(
         except Exception:
             pass
 
+        # ---- Categorical column profiling ----
+        # Detect low-cardinality columns that may need filtering
+        # (e.g., PostTypeId, VoteTypeId, StatusId, outcome_type)
+        TYPE_NAME_SIGNALS = [
+            'type', 'kind', 'category', 'status', 'class', 'group', 'mode',
+            'level', 'tier', 'role', 'source', 'channel', 'method', 'reason',
+        ]
+        CARDINALITY_MIN = 2
+        CARDINALITY_MAX = 20
+
+        def _profile_categorical_columns(table_df, table_name, exclude_cols):
+            profiles = []
+            for col in table_df.columns:
+                if col in exclude_cols:
+                    continue
+                try:
+                    n_unique = table_df[col].nunique()
+                except Exception:
+                    continue
+                if n_unique < CARDINALITY_MIN or n_unique > CARDINALITY_MAX:
+                    continue
+                vc = table_df[col].value_counts(dropna=False).head(20)
+                value_dist = {str(k): int(v) for k, v in vc.items()}
+                col_lower = col.lower()
+                is_type_col = any(sig in col_lower for sig in TYPE_NAME_SIGNALS)
+                profiles.append({
+                    "column": col,
+                    "table": table_name,
+                    "n_distinct": int(n_unique),
+                    "value_distribution": value_dist,
+                    "is_likely_type_column": is_type_col,
+                })
+            return profiles
+
+        exclude_event = {entity_col, time_col}
+        event_cat_profiles = _profile_categorical_columns(df, event_table, exclude_event)
+
+        entity_cat_profiles = []
+        if entity_table and entity_source["has_dedicated_entity_table"]:
+            try:
+                ent_file = os.path.join(csv_dir, f"{entity_table}.csv")
+                ent_df = pd.read_csv(ent_file)
+                ent_pk = _find_entity_pk(ent_df, entity_col)
+                exclude_ent = {ent_pk} if ent_pk else set()
+                if entity_creation_col:
+                    exclude_ent.add(entity_creation_col)
+                entity_cat_profiles = _profile_categorical_columns(
+                    ent_df, entity_table, exclude_ent
+                )
+            except Exception:
+                pass
+
+        # ---- Sentinel value detection on entity ID columns ----
+        sentinel_warnings = []
+        if entity_table and entity_source["has_dedicated_entity_table"]:
+            try:
+                ent_file = os.path.join(csv_dir, f"{entity_table}.csv")
+                ent_df = pd.read_csv(ent_file)
+                ent_pk = _find_entity_pk(ent_df, entity_col)
+                if ent_pk and ent_pk in ent_df.columns:
+                    id_series = ent_df[ent_pk]
+                    null_count = int(id_series.isna().sum())
+                    if null_count > 0:
+                        sentinel_warnings.append({
+                            "table": entity_table, "column": ent_pk,
+                            "issue": "null_entity_ids", "count": null_count,
+                            "recommendation": f"Filter: {ent_pk} IS NOT NULL",
+                        })
+                    if pd.api.types.is_numeric_dtype(id_series):
+                        for sentinel in [-1, 0]:
+                            sc = int((id_series == sentinel).sum())
+                            if 0 < sc < len(id_series) * 0.1:
+                                sentinel_warnings.append({
+                                    "table": entity_table, "column": ent_pk,
+                                    "issue": f"sentinel_value_{sentinel}", "count": sc,
+                                    "recommendation": f"Filter: {ent_pk} != {sentinel}",
+                                })
+            except Exception:
+                pass
+
+        # Check entity_col in event table for FK sentinels
+        if entity_col in df.columns:
+            id_ev = df[entity_col]
+            null_ev = int(id_ev.isna().sum())
+            if 0 < null_ev < len(df) * 0.5:
+                sentinel_warnings.append({
+                    "table": event_table, "column": entity_col,
+                    "issue": "null_fk_entity_ids", "count": null_ev,
+                    "recommendation": f"Filter: {entity_col} IS NOT NULL",
+                })
+            if pd.api.types.is_numeric_dtype(id_ev):
+                for sentinel in [-1, 0]:
+                    sc = int((id_ev == sentinel).sum())
+                    if 0 < sc < len(df) * 0.1:
+                        sentinel_warnings.append({
+                            "table": event_table, "column": entity_col,
+                            "issue": f"sentinel_fk_value_{sentinel}", "count": sc,
+                            "recommendation": f"Filter: {entity_col} != {sentinel}",
+                        })
+
         schema_hints = {
             "event_table_columns": event_table_cols,
             "entity_table_columns": entity_table_cols,
             "potential_join_tables": potential_join_tables,
+            "categorical_columns": event_cat_profiles + entity_cat_profiles,
+            "sentinel_warnings": sentinel_warnings,
         }
 
         # ================================================================
@@ -458,20 +560,33 @@ def analyze_task_structure(
         # with the event table) or multiple related event sources
         _needs_cte = len(potential_join_tables) >= 2
 
+        _has_categorical = bool(event_cat_profiles or entity_cat_profiles)
+
         building_blocks = {
             "needs_cte": _needs_cte,
             "needs_nested_join": _needs_nested_join,
-            "needs_quality_filter": any(
-                kw in task_lower for kw in [
-                    'rating', 'star', 'quality', 'detailed', 'specific',
-                    'click', 'successful', 'primary', 'severe',
-                ]
+            "needs_quality_filter": (
+                any(
+                    kw in task_lower for kw in [
+                        'rating', 'star', 'quality', 'detailed', 'specific',
+                        'click', 'successful', 'primary', 'severe',
+                    ]
+                )
+                or _has_categorical
             ),
             "needs_having": any(
                 kw in task_lower for kw in [
                     'assuming', 'given that', 'if active', 'has at least',
                     'with at least', 'only for', 'who have', 'that have',
                 ]
+            ),
+            "categorical_filter_hint": (
+                "Low-cardinality type/category columns detected in entity or event tables. "
+                "Review schema_hints.categorical_columns to determine if the task requires "
+                "filtering by specific values (e.g., only questions, only upvotes, only primary outcomes). "
+                "Also check schema_hints.sentinel_warnings for entity ID sentinel values to exclude."
+                if (_has_categorical or sentinel_warnings)
+                else None
             ),
         }
 
