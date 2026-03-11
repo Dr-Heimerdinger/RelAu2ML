@@ -3,6 +3,8 @@ from plexe.langgraph.utils.emitters import (
     ConsoleEmitter,
     WebSocketEmitter,
     MultiEmitter,
+    get_current_emitter,
+    set_current_emitter,
 )
 from plexe.langgraph.utils.callbacks import (
     ChainOfThoughtCallback,
@@ -38,6 +40,8 @@ __all__ = [
     "ConsoleEmitter",
     "WebSocketEmitter",
     "MultiEmitter",
+    "get_current_emitter",
+    "set_current_emitter",
     # Callbacks
     "ChainOfThoughtCallback",
     "create_langchain_callbacks",

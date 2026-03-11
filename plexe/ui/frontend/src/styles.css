@@ -615,6 +615,230 @@ body,
   box-shadow: 0 2px 8px rgba(239, 68, 68, 0.15);
 }
 
+/* ===== Training Progress Card ===== */
+.training-progress-card {
+  margin: 0.75rem 0.5rem;
+  padding: 1rem;
+  border-radius: 12px;
+  background: linear-gradient(135deg, #f0f7ff 0%, #f8fafc 100%);
+  border: 1px solid rgba(37, 99, 235, 0.15);
+  box-shadow: 0 2px 8px rgba(37, 99, 235, 0.06);
+  transition: all 0.3s ease;
+}
+
+.training-progress-card.completed {
+  background: linear-gradient(135deg, #f0fdf4 0%, #f8fafc 100%);
+  border-color: rgba(16, 185, 129, 0.25);
+  box-shadow: 0 2px 8px rgba(16, 185, 129, 0.08);
+}
+
+.training-progress-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 0.75rem;
+}
+
+.training-phase-info {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+}
+
+.training-phase-icon {
+  font-size: 1.2rem;
+  line-height: 1;
+}
+
+.training-phase-label {
+  font-weight: 600;
+  font-size: 0.9rem;
+  color: #1e293b;
+}
+
+.training-epoch-counter {
+  font-size: 0.85rem;
+  font-weight: 600;
+  color: #2563eb;
+  background: rgba(37, 99, 235, 0.08);
+  padding: 0.2rem 0.6rem;
+  border-radius: 20px;
+}
+
+/* Epoch progress bar */
+.training-progress-bar-container {
+  display: flex;
+  align-items: center;
+  gap: 0.75rem;
+  margin-bottom: 0.75rem;
+}
+
+.training-progress-bar {
+  flex: 1;
+  height: 8px;
+  background: rgba(37, 99, 235, 0.1);
+  border-radius: 4px;
+  overflow: hidden;
+}
+
+.training-progress-fill {
+  height: 100%;
+  background: linear-gradient(90deg, #2563eb, #3b82f6);
+  border-radius: 4px;
+  transition: width 0.5s ease;
+  position: relative;
+}
+
+.training-progress-fill::after {
+  content: '';
+  position: absolute;
+  top: 0;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  background: linear-gradient(
+    90deg,
+    transparent,
+    rgba(255, 255, 255, 0.3),
+    transparent
+  );
+  animation: shimmer 2s infinite;
+}
+
+.training-progress-fill.completed {
+  background: linear-gradient(90deg, #10b981, #34d399);
+}
+
+.training-progress-fill.completed::after {
+  animation: none;
+}
+
+@keyframes shimmer {
+  0% { transform: translateX(-100%); }
+  100% { transform: translateX(100%); }
+}
+
+.training-progress-percent {
+  font-size: 0.8rem;
+  font-weight: 700;
+  color: #2563eb;
+  min-width: 36px;
+  text-align: right;
+}
+
+/* Batch-level progress */
+.training-batch-progress {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  margin-bottom: 0.5rem;
+}
+
+.training-batch-bar {
+  flex: 1;
+  height: 4px;
+  background: rgba(37, 99, 235, 0.06);
+  border-radius: 2px;
+  overflow: hidden;
+}
+
+.training-batch-fill {
+  height: 100%;
+  background: rgba(37, 99, 235, 0.3);
+  border-radius: 2px;
+  transition: width 0.3s ease;
+}
+
+.training-batch-label {
+  font-size: 0.7rem;
+  color: #6b7280;
+  white-space: nowrap;
+}
+
+/* Stats row */
+.training-stats-row {
+  display: flex;
+  gap: 0.75rem;
+  flex-wrap: wrap;
+  margin-bottom: 0.5rem;
+}
+
+.training-stat {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  padding: 0.4rem 0.6rem;
+  background: rgba(255, 255, 255, 0.7);
+  border-radius: 8px;
+  border: 1px solid rgba(0, 0, 0, 0.05);
+  min-width: 70px;
+}
+
+.training-stat.best {
+  background: rgba(16, 185, 129, 0.08);
+  border-color: rgba(16, 185, 129, 0.2);
+}
+
+.training-stat-label {
+  font-size: 0.65rem;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  color: #6b7280;
+  font-weight: 600;
+}
+
+.training-stat.best .training-stat-label {
+  color: #059669;
+}
+
+.training-stat-value {
+  font-size: 0.85rem;
+  font-weight: 700;
+  color: #1e293b;
+  font-variant-numeric: tabular-nums;
+}
+
+.training-stat.best .training-stat-value {
+  color: #059669;
+}
+
+/* Loss chart */
+.training-loss-chart {
+  margin: 0.5rem 0;
+  position: relative;
+}
+
+.training-loss-chart .chart-label {
+  font-size: 0.7rem;
+  font-weight: 600;
+  color: #6b7280;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  margin-bottom: 0.25rem;
+}
+
+.training-loss-chart svg {
+  width: 100%;
+  height: auto;
+  max-width: 100%;
+}
+
+.chart-axis-label {
+  font-size: 8px;
+  fill: #9ca3af;
+  font-family: 'SF Mono', Monaco, 'Cascadia Code', monospace;
+}
+
+/* Status message */
+.training-status-message {
+  font-size: 0.78rem;
+  color: #6b7280;
+  padding-top: 0.5rem;
+  border-top: 1px solid rgba(0, 0, 0, 0.05);
+  margin-top: 0.5rem;
+  font-style: italic;
+}
+
 /* Thinking/Typing indicator (3 dots animation) */
 .thinking-indicator {
   display: inline-flex;

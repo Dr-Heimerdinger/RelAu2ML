@@ -395,12 +395,12 @@ def execute_training_script(
     timeout: int = 3600
 ) -> Dict[str, Any]:
     """
-    Execute a training script.
-    
+    Execute a training script with real-time progress streaming.
+
     Args:
         script_path: Path to the training script
         timeout: Maximum execution time in seconds
-    
+
     Returns:
         Execution results
     """
@@ -408,6 +408,11 @@ def execute_training_script(
     import os
     import json
     import re
+    import time
+    import select
+    import threading
+
+    from plexe.langgraph.utils.emitters import get_current_emitter
 
     script_path = os.path.abspath(script_path)
     script_dir = os.path.dirname(script_path)
@@ -422,34 +427,274 @@ def execute_training_script(
         paths.append(existing)
     env["PYTHONPATH"] = os.pathsep.join(paths)
 
+    emitter = get_current_emitter()
+
+    # Regex patterns for parsing training output
+    # Matches: Epoch 5/25: Loss=0.0028, Val metrics: {'mae': 0.001, ...}
+    epoch_pattern = re.compile(
+        r"Epoch\s+(\d+)/(\d+):\s+Loss=([\d.]+),\s+Val metrics:\s+(\{.*\})"
+    )
+    # Matches: -> New best model! mae=0.0001 (with optional leading spaces)
+    best_model_pattern = re.compile(r"->\s*New best model!\s+(\w+)=([\d.eE+-]+)")
+    # Matches: Train samples: 79578
+    train_samples_pattern = re.compile(r"Train samples:\s+([\d,]+)")
+    val_samples_pattern = re.compile(r"Val samples:\s+([\d,]+)")
+    test_samples_pattern = re.compile(r"Test samples:\s+([\d,]+)")
+    # Matches: Best Val metrics: {...}
+    best_val_pattern = re.compile(r"Best Val metrics:\s+(\{.*\})")
+    # Matches: Best Test metrics: {...}
+    best_test_pattern = re.compile(r"Best Test metrics:\s+(\{.*\})")
+    # Matches: Training complete!
+    training_complete_pattern = re.compile(r"Training complete!")
+    # Matches tqdm-style: Epoch 1:  45%|████▍     | 70/156 [00:02<00:03, 25.88it/s]
+    tqdm_epoch_pattern = re.compile(r"Epoch\s+(\d+):\s+(\d+)%\|.*\|\s+(\d+)/(\d+)")
+    # Matches: Embedding raw data in mini-batch:  60%|██████    | 18/30
+    embedding_pattern = re.compile(r"Embedding raw data.*?(\d+)%\|.*\|\s+(\d+)/(\d+)")
+
+    epoch_history = []
+    best_metric_name = None
+    best_metric_value = None
+    total_epochs = None
+    stdout_lines = []
+    stderr_lines = []
+
+    def _emit_progress(progress_data):
+        if emitter:
+            progress_data["epoch_history"] = epoch_history
+            if best_metric_name:
+                progress_data["best_metric_name"] = best_metric_name
+            if best_metric_value is not None:
+                progress_data["best_metric_value"] = best_metric_value
+            emitter.emit_training_progress("OperationAgent", progress_data)
+
+    def _parse_metrics_str(metrics_str):
+        """Parse a Python dict-like metrics string into a dict of floats."""
+        try:
+            import ast
+            metrics = ast.literal_eval(metrics_str)
+            return {k: float(v) for k, v in metrics.items()}
+        except Exception:
+            return {}
+
+    def _process_stdout_line(line):
+        nonlocal best_metric_name, best_metric_value, total_epochs
+
+        # Check for epoch result
+        m = epoch_pattern.search(line)
+        if m:
+            current_epoch = int(m.group(1))
+            total_epochs = int(m.group(2))
+            loss = float(m.group(3))
+            metrics = _parse_metrics_str(m.group(4))
+
+            epoch_entry = {
+                "epoch": current_epoch,
+                "loss": loss,
+                "metrics": metrics,
+            }
+            epoch_history.append(epoch_entry)
+
+            _emit_progress({
+                "phase": "training",
+                "current_epoch": current_epoch,
+                "total_epochs": total_epochs,
+                "loss": loss,
+                "metrics": metrics,
+                "is_best": False,
+                "message": f"Epoch {current_epoch}/{total_epochs} - Loss: {loss:.4f}",
+            })
+            return
+
+        # Check for best model notification
+        m = best_model_pattern.search(line)
+        if m:
+            best_metric_name = m.group(1)
+            best_metric_value = float(m.group(2))
+            if epoch_history:
+                epoch_history[-1]["is_best"] = True
+            _emit_progress({
+                "phase": "training",
+                "current_epoch": epoch_history[-1]["epoch"] if epoch_history else 0,
+                "total_epochs": total_epochs or 0,
+                "loss": epoch_history[-1]["loss"] if epoch_history else None,
+                "metrics": epoch_history[-1].get("metrics", {}) if epoch_history else {},
+                "is_best": True,
+                "best_metric_name": best_metric_name,
+                "best_metric_value": best_metric_value,
+                "message": f"New best model! {best_metric_name}={best_metric_value:.6f}",
+            })
+            return
+
+        # Check for sample counts
+        m = train_samples_pattern.search(line)
+        if m:
+            _emit_progress({
+                "phase": "preparing",
+                "message": f"Train samples: {m.group(1)}",
+            })
+            return
+
+        m = val_samples_pattern.search(line)
+        if m:
+            _emit_progress({
+                "phase": "preparing",
+                "message": f"Val samples: {m.group(1)}",
+            })
+            return
+
+        m = test_samples_pattern.search(line)
+        if m:
+            _emit_progress({
+                "phase": "preparing",
+                "message": f"Test samples: {m.group(1)}",
+            })
+            return
+
+        # Best val metrics
+        m = best_val_pattern.search(line)
+        if m:
+            metrics = _parse_metrics_str(m.group(1))
+            _emit_progress({
+                "phase": "evaluating",
+                "message": f"Best Val metrics: {metrics}",
+                "metrics": metrics,
+            })
+            return
+
+        # Best test metrics
+        m = best_test_pattern.search(line)
+        if m:
+            metrics = _parse_metrics_str(m.group(1))
+            _emit_progress({
+                "phase": "evaluating",
+                "message": f"Best Test metrics: {metrics}",
+                "metrics": metrics,
+            })
+            return
+
+        # Training complete
+        if training_complete_pattern.search(line):
+            _emit_progress({
+                "phase": "completed",
+                "current_epoch": total_epochs or 0,
+                "total_epochs": total_epochs or 0,
+                "message": "Training complete!",
+            })
+            return
+
+    # Throttle state for tqdm updates (avoid flooding WebSocket)
+    _last_stderr_emit = [0.0]  # mutable list for closure access
+
+    def _process_stderr_line(line):
+        """Process stderr lines (tqdm progress bars, embedding progress)."""
+        now = time.time()
+        # Throttle stderr emissions to at most once per 2 seconds
+        if now - _last_stderr_emit[0] < 2.0:
+            return
+
+        # tqdm epoch progress (batch-level)
+        m = tqdm_epoch_pattern.search(line)
+        if m:
+            epoch_num = int(m.group(1))
+            pct = int(m.group(2))
+            current_batch = int(m.group(3))
+            total_batches = int(m.group(4))
+            _last_stderr_emit[0] = now
+            _emit_progress({
+                "phase": "training",
+                "current_epoch": epoch_num,
+                "total_epochs": total_epochs or 0,
+                "batch_progress": pct,
+                "current_batch": current_batch,
+                "total_batches": total_batches,
+                "message": f"Epoch {epoch_num} - Batch {current_batch}/{total_batches} ({pct}%)",
+            })
+            return
+
+        # Embedding progress
+        m = embedding_pattern.search(line)
+        if m:
+            pct = int(m.group(1))
+            current = int(m.group(2))
+            total = int(m.group(3))
+            _last_stderr_emit[0] = now
+            _emit_progress({
+                "phase": "embedding",
+                "message": f"Embedding data: {current}/{total} ({pct}%)",
+                "batch_progress": pct,
+            })
+            return
+
     try:
-        result = subprocess.run(
-            ["python", script_path],
+        # Use Popen to stream output in real-time
+        process = subprocess.Popen(
+            ["python", "-u", script_path],  # -u for unbuffered output
             cwd=script_dir,
             env=env,
-            capture_output=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
             text=True,
-            timeout=timeout
+            bufsize=1,  # Line-buffered
         )
 
-        results_path = os.path.join(script_dir, "training_results.json")
+        # Emit initial progress
+        _emit_progress({
+            "phase": "preparing",
+            "message": "Starting training script...",
+        })
 
+        # Read stdout and stderr in separate threads to avoid deadlocks
+        def _read_stream(stream, line_list, processor):
+            for line in iter(stream.readline, ''):
+                stripped = line.rstrip('\n\r')
+                if stripped:
+                    line_list.append(stripped)
+                    try:
+                        processor(stripped)
+                    except Exception:
+                        pass
+            stream.close()
+
+        stdout_thread = threading.Thread(
+            target=_read_stream, args=(process.stdout, stdout_lines, _process_stdout_line)
+        )
+        stderr_thread = threading.Thread(
+            target=_read_stream, args=(process.stderr, stderr_lines, _process_stderr_line)
+        )
+        stdout_thread.daemon = True
+        stderr_thread.daemon = True
+        stdout_thread.start()
+        stderr_thread.start()
+
+        # Wait for process with timeout
+        try:
+            process.wait(timeout=timeout)
+        except subprocess.TimeoutExpired:
+            process.kill()
+            stdout_thread.join(timeout=5)
+            stderr_thread.join(timeout=5)
+            return {
+                "status": "timeout",
+                "error": f"Script execution exceeded {timeout} seconds",
+                "stdout": "\n".join(stdout_lines),
+                "stderr": "\n".join(stderr_lines),
+            }
+
+        stdout_thread.join(timeout=10)
+        stderr_thread.join(timeout=10)
+
+        results_path = os.path.join(script_dir, "training_results.json")
         training_results = {}
         if os.path.exists(results_path):
             with open(results_path) as f:
                 training_results = json.load(f)
 
         return {
-            "status": "success" if result.returncode == 0 else "failed",
-            "stdout": result.stdout,
-            "stderr": result.stderr,
-            "return_code": result.returncode,
-            "training_results": training_results
-        }
-    except subprocess.TimeoutExpired:
-        return {
-            "status": "timeout",
-            "error": f"Script execution exceeded {timeout} seconds"
+            "status": "success" if process.returncode == 0 else "failed",
+            "stdout": "\n".join(stdout_lines),
+            "stderr": "\n".join(stderr_lines),
+            "return_code": process.returncode,
+            "training_results": training_results,
         }
     except Exception as e:
         return {

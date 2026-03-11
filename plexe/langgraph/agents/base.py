@@ -16,6 +16,7 @@ from langchain.agents import create_agent
 from plexe.langgraph.config import AgentConfig, get_llm_from_model_id
 from plexe.langgraph.state import PipelineState, ErrorCategory
 from plexe.langgraph.utils import BaseEmitter, ChainOfThoughtCallback
+from plexe.langgraph.utils.emitters import set_current_emitter
 from plexe.langgraph.mcp_manager import MCPManager
 
 logger = logging.getLogger(__name__)
@@ -266,7 +267,8 @@ class BaseAgent(ABC):
         
         if self.emitter:
             self.emitter.emit_agent_start(self.name, self.model_id)
-        
+            set_current_emitter(self.emitter)
+
         try:
             config = {"callbacks": [self._callback_handler]} if self.emitter else {}
             

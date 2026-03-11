@@ -1,4 +1,5 @@
 import asyncio
+import contextvars
 import logging
 from abc import ABC, abstractmethod
 from typing import Dict, Any, Optional, List
@@ -7,6 +8,21 @@ from datetime import datetime
 from plexe.langgraph.utils.logging_utils import log_session_event
 
 logger = logging.getLogger(__name__)
+
+# Context variable to make the current emitter accessible from within tools
+current_emitter_var: contextvars.ContextVar[Optional['BaseEmitter']] = contextvars.ContextVar(
+    'current_emitter', default=None
+)
+
+
+def get_current_emitter() -> Optional['BaseEmitter']:
+    """Get the current emitter from context (usable from within tool functions)."""
+    return current_emitter_var.get()
+
+
+def set_current_emitter(emitter: Optional['BaseEmitter']):
+    """Set the current emitter in context."""
+    current_emitter_var.set(emitter)
 
 
 class BaseEmitter(ABC):
@@ -36,6 +52,25 @@ class BaseEmitter(ABC):
     def emit_tool_result(self, agent_name: str, tool_name: str, result: str):
         """Emit tool result notification."""
         pass
+
+    def emit_training_progress(self, agent_name: str, progress_data: Dict[str, Any]):
+        """Emit training progress update (epoch, loss, metrics, etc.).
+
+        Args:
+            agent_name: Name of the agent
+            progress_data: Dict with keys like:
+                - phase: "preparing" | "embedding" | "training" | "evaluating" | "completed"
+                - current_epoch: Current epoch number
+                - total_epochs: Total epochs
+                - loss: Current training loss
+                - metrics: Validation metrics dict
+                - best_metric_name: Name of the metric being optimized
+                - best_metric_value: Best value so far
+                - is_best: Whether this epoch achieved best metric
+                - message: Human-readable status message
+                - epoch_history: List of {epoch, loss, metrics} for chart
+        """
+        pass  # Default no-op; subclasses override
 
 
 class ConsoleEmitter(BaseEmitter):
@@ -86,6 +121,18 @@ class ConsoleEmitter(BaseEmitter):
         # Format with newlines for better readability
         formatted_result = result.replace('\\n', '\n') if result else ""
         print(f"  Tool result:\n{formatted_result}")
+
+    def emit_training_progress(self, agent_name: str, progress_data: Dict[str, Any]):
+        phase = progress_data.get("phase", "training")
+        epoch = progress_data.get("current_epoch", 0)
+        total = progress_data.get("total_epochs", 0)
+        loss = progress_data.get("loss")
+        msg = progress_data.get("message", "")
+        loss_str = f" Loss={loss:.4f}" if loss is not None else ""
+        if epoch and total:
+            print(f"[{agent_name}] Training [{phase}] Epoch {epoch}/{total}{loss_str} - {msg}")
+        else:
+            print(f"[{agent_name}] Training [{phase}] {msg}")
 
 
 class WebSocketEmitter(BaseEmitter):
@@ -222,6 +269,28 @@ class WebSocketEmitter(BaseEmitter):
         # Log to session file (truncate result for log)
         log_session_event("tool_result", f"Result from {tool_name}: {result[:500] if result else 'empty'}", agent_name)
 
+    def emit_training_progress(self, agent_name: str, progress_data: Dict[str, Any]):
+        self.step_count += 1
+        timestamp = datetime.now().strftime("%H:%M:%S")
+        self._send_message({
+            "type": "thinking",
+            "role": "thinking",
+            "event_type": "training_progress",
+            "agent_name": agent_name,
+            "progress": progress_data,
+            "message": progress_data.get("message", "Training in progress..."),
+            "step_number": self.step_count,
+            "timestamp": timestamp,
+        })
+        # Log to session file
+        epoch = progress_data.get("current_epoch", "")
+        total = progress_data.get("total_epochs", "")
+        log_session_event(
+            "training_progress",
+            f"Epoch {epoch}/{total}: {progress_data.get('message', '')}",
+            agent_name,
+        )
+
 
 class MultiEmitter(BaseEmitter):
     """Combines multiple emitters."""
@@ -261,5 +330,12 @@ class MultiEmitter(BaseEmitter):
         for emitter in self.emitters:
             try:
                 emitter.emit_tool_result(agent_name, tool_name, result)
+            except Exception as e:
+                logger.warning(f"Emitter error: {e}")
+
+    def emit_training_progress(self, agent_name: str, progress_data: Dict[str, Any]):
+        for emitter in self.emitters:
+            try:
+                emitter.emit_training_progress(agent_name, progress_data)
             except Exception as e:
                 logger.warning(f"Emitter error: {e}")

@@ -1,4 +1,251 @@
-import React, { useEffect, useRef, useState } from 'react'
+import React, { useEffect, useRef, useState, useMemo } from 'react'
+
+// ===================== Training Progress Component =====================
+
+const TrainingProgress = ({ steps }) => {
+    // Aggregate all training_progress events to build the full picture
+    const progressState = useMemo(() => {
+        let phase = 'preparing'
+        let currentEpoch = 0
+        let totalEpochs = 0
+        let currentLoss = null
+        let batchProgress = null
+        let currentBatch = 0
+        let totalBatches = 0
+        let bestMetricName = null
+        let bestMetricValue = null
+        let latestMetrics = {}
+        let epochHistory = []
+        let lastMessage = ''
+        let isCompleted = false
+
+        const seenEpochs = new Set()
+
+        for (const step of steps) {
+            const p = step.progress
+            if (!p) continue
+
+            if (p.phase) phase = p.phase
+            if (p.message) lastMessage = p.message
+            if (p.total_epochs) totalEpochs = p.total_epochs
+            if (p.best_metric_name) bestMetricName = p.best_metric_name
+            if (p.best_metric_value !== undefined && p.best_metric_value !== null) bestMetricValue = p.best_metric_value
+            if (p.metrics && Object.keys(p.metrics).length > 0) latestMetrics = p.metrics
+            if (p.batch_progress !== undefined) batchProgress = p.batch_progress
+            if (p.current_batch) currentBatch = p.current_batch
+            if (p.total_batches) totalBatches = p.total_batches
+
+            // Build epoch history from epoch-level events
+            if (p.current_epoch && p.loss !== undefined && p.loss !== null && p.phase === 'training') {
+                currentEpoch = p.current_epoch
+                currentLoss = p.loss
+
+                if (!seenEpochs.has(p.current_epoch)) {
+                    seenEpochs.add(p.current_epoch)
+                    epochHistory.push({
+                        epoch: p.current_epoch,
+                        loss: p.loss,
+                        metrics: p.metrics || {},
+                        isBest: p.is_best || false,
+                    })
+                }
+            } else if (p.current_epoch) {
+                currentEpoch = p.current_epoch
+            }
+
+            if (p.is_best && epochHistory.length > 0) {
+                epochHistory[epochHistory.length - 1].isBest = true
+            }
+
+            if (p.phase === 'completed') isCompleted = true
+
+            // Also accept epoch_history from backend if provided
+            if (p.epoch_history && p.epoch_history.length > epochHistory.length) {
+                epochHistory = p.epoch_history.map(e => ({
+                    epoch: e.epoch,
+                    loss: e.loss,
+                    metrics: e.metrics || {},
+                    isBest: e.is_best || false,
+                }))
+            }
+        }
+
+        return {
+            phase, currentEpoch, totalEpochs, currentLoss, batchProgress,
+            currentBatch, totalBatches, bestMetricName, bestMetricValue,
+            latestMetrics, epochHistory, lastMessage, isCompleted
+        }
+    }, [steps])
+
+    const {
+        phase, currentEpoch, totalEpochs, currentLoss, batchProgress,
+        currentBatch, totalBatches, bestMetricName, bestMetricValue,
+        latestMetrics, epochHistory, lastMessage, isCompleted
+    } = progressState
+
+    const epochPercent = totalEpochs > 0 ? Math.round((currentEpoch / totalEpochs) * 100) : 0
+
+    // Mini loss chart using SVG
+    const LossChart = ({ history }) => {
+        if (!history || history.length < 2) return null
+
+        const width = 280
+        const height = 80
+        const padding = { top: 8, right: 8, bottom: 20, left: 35 }
+        const chartW = width - padding.left - padding.right
+        const chartH = height - padding.top - padding.bottom
+
+        const losses = history.map(h => h.loss)
+        const maxLoss = Math.max(...losses)
+        const minLoss = Math.min(...losses)
+        const lossRange = maxLoss - minLoss || 1
+
+        const points = history.map((h, i) => {
+            const x = padding.left + (i / (history.length - 1)) * chartW
+            const y = padding.top + (1 - (h.loss - minLoss) / lossRange) * chartH
+            return { x, y, ...h }
+        })
+
+        const linePath = points.map((p, i) => `${i === 0 ? 'M' : 'L'} ${p.x} ${p.y}`).join(' ')
+
+        // Area path (fill under line)
+        const areaPath = linePath +
+            ` L ${points[points.length - 1].x} ${padding.top + chartH}` +
+            ` L ${points[0].x} ${padding.top + chartH} Z`
+
+        return (
+            <div className="training-loss-chart">
+                <div className="chart-label">Loss</div>
+                <svg width={width} height={height} viewBox={`0 0 ${width} ${height}`}>
+                    {/* Grid lines */}
+                    <line x1={padding.left} y1={padding.top} x2={padding.left} y2={padding.top + chartH}
+                          stroke="#e5e7eb" strokeWidth="1" />
+                    <line x1={padding.left} y1={padding.top + chartH} x2={padding.left + chartW} y2={padding.top + chartH}
+                          stroke="#e5e7eb" strokeWidth="1" />
+
+                    {/* Y-axis labels */}
+                    <text x={padding.left - 4} y={padding.top + 4} textAnchor="end"
+                          className="chart-axis-label">{maxLoss.toFixed(3)}</text>
+                    <text x={padding.left - 4} y={padding.top + chartH} textAnchor="end"
+                          className="chart-axis-label">{minLoss.toFixed(3)}</text>
+
+                    {/* X-axis labels */}
+                    <text x={padding.left} y={height - 2} textAnchor="middle"
+                          className="chart-axis-label">1</text>
+                    <text x={padding.left + chartW} y={height - 2} textAnchor="middle"
+                          className="chart-axis-label">{history.length}</text>
+
+                    {/* Area fill */}
+                    <path d={areaPath} fill="rgba(37, 99, 235, 0.08)" />
+
+                    {/* Loss line */}
+                    <path d={linePath} fill="none" stroke="#2563eb" strokeWidth="2" strokeLinejoin="round" />
+
+                    {/* Best epoch markers */}
+                    {points.filter(p => p.isBest).map((p, i) => (
+                        <circle key={i} cx={p.x} cy={p.y} r="3" fill="#10b981" stroke="#fff" strokeWidth="1" />
+                    ))}
+
+                    {/* Current point */}
+                    {points.length > 0 && (
+                        <circle cx={points[points.length - 1].x} cy={points[points.length - 1].y}
+                                r="3" fill="#2563eb" stroke="#fff" strokeWidth="1" />
+                    )}
+                </svg>
+            </div>
+        )
+    }
+
+    const phaseLabels = {
+        preparing: 'Preparing Data',
+        embedding: 'Embedding Data',
+        training: 'Training Model',
+        evaluating: 'Evaluating Model',
+        completed: 'Training Complete',
+    }
+
+    const phaseIcons = {
+        preparing: '\u{1F4E6}',
+        embedding: '\u{1F9E9}',
+        training: '\u{1F3CB}',
+        evaluating: '\u{1F4CA}',
+        completed: '\u2705',
+    }
+
+    return (
+        <div className={`training-progress-card ${isCompleted ? 'completed' : ''}`}>
+            {/* Phase header */}
+            <div className="training-progress-header">
+                <div className="training-phase-info">
+                    <span className="training-phase-icon">{phaseIcons[phase] || '\u{1F504}'}</span>
+                    <span className="training-phase-label">{phaseLabels[phase] || phase}</span>
+                </div>
+                {totalEpochs > 0 && (
+                    <span className="training-epoch-counter">
+                        Epoch {currentEpoch}/{totalEpochs}
+                    </span>
+                )}
+            </div>
+
+            {/* Epoch progress bar */}
+            {totalEpochs > 0 && (
+                <div className="training-progress-bar-container">
+                    <div className="training-progress-bar">
+                        <div
+                            className={`training-progress-fill ${isCompleted ? 'completed' : ''}`}
+                            style={{ width: `${epochPercent}%` }}
+                        />
+                    </div>
+                    <span className="training-progress-percent">{epochPercent}%</span>
+                </div>
+            )}
+
+            {/* Batch-level progress (within epoch) */}
+            {batchProgress !== null && batchProgress < 100 && phase === 'training' && !isCompleted && (
+                <div className="training-batch-progress">
+                    <div className="training-batch-bar">
+                        <div className="training-batch-fill" style={{ width: `${batchProgress}%` }} />
+                    </div>
+                    <span className="training-batch-label">
+                        Batch {currentBatch}/{totalBatches}
+                    </span>
+                </div>
+            )}
+
+            {/* Stats row */}
+            <div className="training-stats-row">
+                {currentLoss !== null && (
+                    <div className="training-stat">
+                        <span className="training-stat-label">Loss</span>
+                        <span className="training-stat-value">{currentLoss.toFixed(4)}</span>
+                    </div>
+                )}
+                {bestMetricName && bestMetricValue !== null && (
+                    <div className="training-stat best">
+                        <span className="training-stat-label">Best {bestMetricName}</span>
+                        <span className="training-stat-value">{bestMetricValue.toFixed(6)}</span>
+                    </div>
+                )}
+                {Object.entries(latestMetrics).slice(0, 3).map(([key, val]) => (
+                    <div className="training-stat" key={key}>
+                        <span className="training-stat-label">{key}</span>
+                        <span className="training-stat-value">{typeof val === 'number' ? val.toFixed(4) : val}</span>
+                    </div>
+                ))}
+            </div>
+
+            {/* Loss chart */}
+            <LossChart history={epochHistory} />
+
+            {/* Status message */}
+            {lastMessage && (
+                <div className="training-status-message">{lastMessage}</div>
+            )}
+        </div>
+    )
+}
+
+// ===================== Original Chat Components =====================
 
 // Icons for different event types
 const EventIcon = ({ eventType }) => {
@@ -60,6 +307,15 @@ const getAgentTheme = (name = '') => {
             tint: 'rgba(44, 62, 80, 0.08)',
             wash: 'rgba(44, 62, 80, 0.04)',
             border: 'rgba(44, 62, 80, 0.3)'
+        }
+    }
+
+    if (lowerName.includes('operation')) {
+        return {
+            accent: '#d97706',
+            tint: 'rgba(217, 119, 6, 0.08)',
+            wash: 'rgba(217, 119, 6, 0.04)',
+            border: 'rgba(217, 119, 6, 0.3)'
         }
     }
 
@@ -368,9 +624,22 @@ const AgentGroup = ({ group }) => {
                     </span>
                 </div>
                 <div className="agent-group-content">
-                    {group.steps.map((step, idx) => (
-                        <EventItem key={idx} step={step} />
-                    ))}
+                    {(() => {
+                        // Separate training_progress steps from other steps
+                        const trainingSteps = group.steps.filter(s => s.event_type === 'training_progress')
+                        const otherSteps = group.steps.filter(s => s.event_type !== 'training_progress')
+
+                        return (
+                            <>
+                                {otherSteps.map((step, idx) => (
+                                    <EventItem key={`evt-${idx}`} step={step} />
+                                ))}
+                                {trainingSteps.length > 0 && (
+                                    <TrainingProgress steps={trainingSteps} />
+                                )}
+                            </>
+                        )
+                    })()}
                 </div>
             </div>
         </div>
