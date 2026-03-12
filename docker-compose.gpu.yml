@@ -16,24 +16,6 @@ services:
     networks:
       - plexe-net
 
-  mlflow:
-    build:
-      context: .
-      dockerfile: Dockerfile.mlflow
-    depends_on:
-      - postgres
-    environment:
-      BACKEND_STORE_URI: ${MLFLOW_BACKEND_STORE_URI:-postgresql+psycopg2://mlflow:mlflow@postgres:5432/mlflow_db}
-      ARTIFACT_ROOT: /mlruns
-      MLFLOW_ALLOW_ORIGINS: ${MLFLOW_ALLOW_ORIGINS:-*}
-      MLFLOW_SERVER_ALLOWED_HOSTS: ${MLFLOW_SERVER_ALLOWED_HOSTS:-mlflow,localhost,127.0.0.1,localhost:5000,127.0.0.1:5000,mlflow:5000}
-    volumes:
-      - ./mlruns:/mlruns
-    ports:
-      - "5000:5000"
-    networks:
-      - plexe-net
-
   pgadmin:
     image: dpage/pgadmin4:7
     environment:
@@ -72,9 +54,6 @@ services:
       postgres:
         condition: service_started
     environment:
-      MLFLOW_TRACKING_URI: ${MLFLOW_TRACKING_URI:-http://mlflow:5000}
-      MLFLOW_BACKEND_STORE_URI: ${MLFLOW_BACKEND_STORE_URI:-postgresql+psycopg2://mlflow:mlflow@postgres:5432/mlflow_db}
-      MLFLOW_HTTP_REQUEST_TIMEOUT: 300
       HF_TOKEN: ${HF_TOKEN}
       HUGGINGFACE_API_KEY: ${HUGGINGFACE_API_KEY}
       # API Keys for LLM providers
