@@ -27,11 +27,8 @@ COPY pyproject.toml README.md ./
 # (enables Docker layer caching — this layer is reused unless pyproject.toml changes)
 RUN mkdir -p plexe && touch plexe/__init__.py
 
-# Install main deps + chatui (không gồm mlflow) để tách biệt layer
+# Install main deps + chatui
 RUN uv pip install ".[chatui]"
- 
-# MLflow trong layer riêng — dễ rebuild nếu có conflict
-RUN uv pip install ".[mlflow]"
 
 # Force CPU torch (replaces default CUDA-capable torch with a smaller CPU wheel)
 RUN uv pip install torch==2.3.1 --index-url https://download.pytorch.org/whl/cpu
@@ -44,11 +41,8 @@ FROM deps as app
 
 COPY . .
 
-# Re-install in editable mode (main + chatui)
+# Re-install in editable mode
 RUN uv pip install -e ".[chatui]"
- 
-# Re-pin mlflow sau editable install
-RUN uv pip install ".[mlflow]"
 
 # Re-pin CPU torch + PyG extensions (guard against uv pulling a newer torch)
 RUN uv pip install torch==2.3.1 --index-url https://download.pytorch.org/whl/cpu && \
