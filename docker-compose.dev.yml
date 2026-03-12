@@ -37,7 +37,7 @@ services:
       - ./plexe/ui/frontend/vite.config.js:/app/vite.config.js
       - /app/node_modules
     ports:
-      - "${FRONTEND_PORT:-3000}:3000"
+      - "${FRONTEND_PORT:-3000}:${FRONTEND_PORT:-3000}"
     environment:
       VITE_BACKEND_URL: ${VITE_BACKEND_URL:-http://localhost:8000}
       VITE_FRONTEND_PORT: ${FRONTEND_PORT:-3000}
@@ -49,8 +49,8 @@ services:
       context: .
       dockerfile: Dockerfile.dev
     depends_on:
-      postgres:
-        condition: service_started
+      - postgres
+    command: sh -c "python -m uvicorn plexe.server:app --host 0.0.0.0 --port $${BACKEND_PORT:-8000} --reload --reload-dir plexe"
     environment:
       BACKEND_PORT: ${BACKEND_PORT:-8000}
       HF_TOKEN: ${HF_TOKEN}

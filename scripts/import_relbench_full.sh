@@ -13,7 +13,7 @@
 
 set -eo pipefail
 
-CONTAINER_NAME="plexe-clone-postgres-1"
+CONTAINER_NAME="relau2ml-postgres-1"
 DB_USER="mlflow"
 DB_PASSWORD="mlflow"
 
