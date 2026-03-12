@@ -38,7 +38,7 @@ services:
       - ./plexe/ui/frontend/vite.config.js:/app/vite.config.js
       - /app/node_modules
     ports:
-      - "${FRONTEND_PORT:-3000}:3000"
+      - "${FRONTEND_PORT:-3000}:${FRONTEND_PORT:-3000}"
     environment:
       # Use 'backend' as the host for Docker inter-container communication
       VITE_BACKEND_HOST: backend
@@ -55,6 +55,7 @@ services:
     depends_on:
       postgres:
         condition: service_started
+    command: sh -c "python -m uvicorn plexe.server:app --host 0.0.0.0 --port $${BACKEND_PORT:-8100} --reload --reload-dir plexe"
     environment:
       BACKEND_PORT: ${BACKEND_PORT:-8100}
       HF_TOKEN: ${HF_TOKEN}
