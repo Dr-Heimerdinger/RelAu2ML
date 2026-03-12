@@ -3385,6 +3385,26 @@ body,
   border-radius: 10px;
 }
 
+.cumulative-token-counter {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.25rem;
+  font-size: 0.7rem;
+  font-weight: 600;
+  padding: 0.15rem 0.45rem;
+  border-radius: 4px;
+  background: var(--token-badge-bg);
+  color: var(--token-badge-text);
+  border: 1px solid var(--token-badge-border);
+  font-family: "SF Mono", "Monaco", "Consolas", monospace;
+  white-space: nowrap;
+  margin-left: 0.25rem;
+}
+
+.cumulative-token-counter .token-budget-label {
+  opacity: 0.7;
+}
+
 .pipeline-stages {
   display: flex;
   align-items: center;

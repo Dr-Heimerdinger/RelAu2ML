@@ -22,6 +22,7 @@ from plexe.langgraph.state import (
 )
 from plexe.langgraph.config import AgentConfig
 from plexe.langgraph.utils import BaseEmitter, ConsoleEmitter, ChainOfThoughtCallback
+from plexe.langgraph.utils.token_tracker import TokenTracker
 from plexe.langgraph.agents import (
     ConversationalAgent,
     EDAAgent,
@@ -67,7 +68,8 @@ class PlexeOrchestrator:
         self.verbose = verbose
         self.callback = callback
         self.emitter = emitter or ConsoleEmitter()
-        
+        self.token_tracker = TokenTracker(budget=self.config.token_budget)
+
         self._init_agents()
         self._build_graph()
     
@@ -86,12 +88,17 @@ class PlexeOrchestrator:
     
     def _init_agents(self):
         """Initialize all agents."""
-        self.conversational_agent = ConversationalAgent(config=self.config)
-        self.eda_agent = EDAAgent(config=self.config)
-        self.dataset_builder_agent = DatasetBuilderAgent(config=self.config)
-        self.task_builder_agent = TaskBuilderAgent(config=self.config)
-        self.gnn_specialist_agent = RelationalGNNSpecialistAgent(config=self.config)
-        self.operation_agent = OperationAgent(config=self.config)
+        tracker = self.token_tracker
+        self.conversational_agent = ConversationalAgent(config=self.config, token_tracker=tracker)
+        self.eda_agent = EDAAgent(config=self.config, token_tracker=tracker)
+        self.dataset_builder_agent = DatasetBuilderAgent(config=self.config, token_tracker=tracker)
+        self.task_builder_agent = TaskBuilderAgent(config=self.config, token_tracker=tracker)
+        self.gnn_specialist_agent = RelationalGNNSpecialistAgent(config=self.config, token_tracker=tracker)
+        self.operation_agent = OperationAgent(
+            emitter=self.emitter,
+            config=self.config,
+            token_tracker=tracker,
+        )
         
         for agent in [
             self.conversational_agent,
@@ -163,6 +170,8 @@ class PlexeOrchestrator:
             }
         )
         
+        # Operation agent handles its own debug loop internally (up to 3
+        # LLM-powered attempts).  It always returns COMPLETED or FAILED.
         workflow.add_edge("operation", END)
         
         workflow.add_conditional_edges(
@@ -216,7 +225,6 @@ class PlexeOrchestrator:
         """Handle operation and finalization."""
         self._log_phase("Operation", "OperationAgent")
         result = self.operation_agent.invoke(state)
-        result["current_phase"] = PipelinePhase.COMPLETED.value
         return result
     
     def _error_handler_node(self, state: PipelineState) -> Dict[str, Any]:
@@ -441,6 +449,7 @@ class PlexeOrchestrator:
                 "state": final_state,
                 "session_id": session_id,
                 "working_dir": working_dir,
+                "token_usage": self.token_tracker.summary(),
             }
         except Exception as e:
             logger.error(f"Pipeline execution failed: {e}")
@@ -449,6 +458,7 @@ class PlexeOrchestrator:
                 "error": str(e),
                 "session_id": session_id,
                 "working_dir": working_dir,
+                "token_usage": self.token_tracker.summary(),
             }
     
     def chat(

@@ -1,144 +1,449 @@
 """
-Operation Agent.
+Operation Agent — Hybrid Deterministic + Self-Debugging.
 
-This agent handles environment setup, execution monitoring,
-and final model packaging.
+Architecture (inspired by Self-Debugging [ICLR 2024] & AutoML-Agent [ICML 2025]):
+  Phase 1: Deterministic execution (0 LLM tokens) — run the training script as-is.
+  Phase 2: On failure, invoke LLM to analyze the traceback and patch the script,
+           then re-execute.  Up to MAX_DEBUG_ITERATIONS rounds (default 3).
+
+This gives zero token cost on the happy path while still recovering from
+runtime errors that require code-level reasoning.
 """
 
+import json
 import logging
-from typing import Optional, List, Dict, Any
+import os
+import re
+from datetime import datetime
+from typing import Optional, Dict, Any
 
-from langchain_core.tools import BaseTool
-
-from plexe.langgraph.agents.base import BaseAgent
-from plexe.langgraph.config import AgentConfig
 from plexe.langgraph.state import PipelineState, PipelinePhase
 from plexe.langgraph.tools.gnn_specialist import execute_training_script
-from plexe.langgraph.prompts.operation import OPERATION_SYSTEM_PROMPT
+from plexe.langgraph.utils.emitters import set_current_emitter, BaseEmitter
 
 logger = logging.getLogger(__name__)
 
 
-class OperationAgent(BaseAgent):
-    """Agent for environment setup and execution monitoring."""
-    
+class OperationAgent:
+    """Hybrid agent: deterministic execution + LLM-powered self-debugging on failure."""
+
+    MAX_DEBUG_ITERATIONS = 3
+
     def __init__(
         self,
-        config: Optional[AgentConfig] = None,
-        additional_tools: Optional[List[BaseTool]] = None,
+        emitter: Optional[BaseEmitter] = None,
+        config=None,
+        token_tracker=None,
     ):
-        tools = [
-            execute_training_script,
-        ]
-        
-        if additional_tools:
-            tools.extend(additional_tools)
-        
-        super().__init__(
-            agent_type="operation",
-            config=config,
-            tools=tools,
-        )
-    
+        self.emitter = emitter
+        self.token_tracker = token_tracker
+        # Lazy-import to avoid circular deps; store config for LLM creation
+        if config is None:
+            from plexe.langgraph.config import AgentConfig
+            config = AgentConfig.from_env()
+        self.config = config
+
     @property
-    def system_prompt(self) -> str:
-        return OPERATION_SYSTEM_PROMPT
-    
-    def _build_context(self, state: PipelineState) -> str:
-        """Build context with operation-specific information."""
-        context_parts = []
-        
-        working_dir = state.get("working_dir", "")
-        context_parts.append(f"Working directory: {working_dir}")
-        
-        # Check if training script is ready
-        training_script_ready = state.get("training_script_ready", False)
-        training_script_path = state.get("training_script_path", f"{working_dir}/train_script.py")
-        
-        if training_script_ready:
-            context_parts.append(f"Training script ready: {training_script_path}")
-        
-        # Check if training has been executed
-        if state.get("training_result"):
-            result = state["training_result"]
-            context_parts.append(f"Training already completed:")
-            context_parts.append(f"  - Metrics: {result.get('metrics')}")
-            context_parts.append(f"  - Model path: {result.get('model_path')}")
-        
-        # Check for hyperparameters from GNN Specialist
-        if state.get("selected_hyperparameters"):
-            hp = state["selected_hyperparameters"]
-            context_parts.append(f"Selected hyperparameters: {hp}")
-        
-        if state.get("error_history"):
-            context_parts.append(f"Previous errors: {state['error_history']}")
-        
-        # Instructions based on state
-        if not state.get("training_result"):
-            context_parts.append(f"""
-EXECUTE TRAINING:
-1. execute_training_script(
-    script_path="{training_script_path}",
-    timeout=3600  # 1 hour timeout
-)
-2. Process the training results from {working_dir}/training_results.json
-3. Report metrics and model location
-""")
-        else:
-            context_parts.append(f"""
-FINALIZE PIPELINE:
-1. Review training results
-2. List all generated artifacts:
-   - {working_dir}/dataset.py - Dataset class
-   - {working_dir}/task.py - Task class  
-   - {working_dir}/train_script.py - Training script
-   - {working_dir}/best_model.pt - Trained model
-   - {working_dir}/training_results.json - Training metrics
-3. Provide summary and deployment recommendations
-""")
-        
-        return "\n".join(context_parts)
-    
-    def _process_result(self, result: Dict[str, Any], state: PipelineState) -> Dict[str, Any]:
-        """Process result and finalize the pipeline."""
-        base_result = super()._process_result(result, state)
-        
-        import os
-        import json
-        
+    def name(self) -> str:
+        return "OperationAgent"
+
+    def set_emitter(self, emitter: BaseEmitter):
+        self.emitter = emitter
+
+    # ------------------------------------------------------------------
+    # Main entry point
+    # ------------------------------------------------------------------
+    def invoke(self, state: PipelineState) -> Dict[str, Any]:
+        """Execute training and finalize the pipeline."""
+        if self.emitter:
+            self.emitter.emit_agent_start(self.name, "deterministic")
+            set_current_emitter(self.emitter)
+
         working_dir = state.get("working_dir", ".")
+        script_path = state.get(
+            "training_script_path", os.path.join(working_dir, "train_script.py")
+        )
+
+        # Already completed — just finalize
+        if state.get("training_result"):
+            return self._finalize_success_from_state(state)
+
+        # Script missing — hard error
+        if not os.path.exists(script_path):
+            return self._finalize_failure(
+                f"Training script not found at {script_path}", state
+            )
+
+        # --- Phase 1: deterministic execution (0 tokens) ---
+        exec_result = self._execute(script_path)
+        if exec_result.get("status") == "success":
+            return self._finalize_success(exec_result, state)
+
+        # --- Phase 2: self-debug loop (LLM on failure) ---
+        error_msg = self._extract_error(exec_result, exec_result.get("status", "error"))
+        previous_errors = []
+
+        for attempt in range(1, self.MAX_DEBUG_ITERATIONS + 1):
+            logger.info(f"Self-debug attempt {attempt}/{self.MAX_DEBUG_ITERATIONS}")
+            if self.emitter:
+                self.emitter.emit_thought(
+                    self.name,
+                    f"Debug attempt {attempt}/{self.MAX_DEBUG_ITERATIONS}: analyzing error and patching script",
+                )
+
+            # Read current script
+            try:
+                with open(script_path) as f:
+                    current_script = f.read()
+            except Exception as e:
+                return self._finalize_failure(f"Cannot read script: {e}", state)
+
+            # Ask LLM to fix
+            fixed_script = self._llm_debug(
+                current_script, error_msg, state, attempt, previous_errors
+            )
+
+            if fixed_script is None:
+                logger.warning("LLM could not produce a fix, stopping debug loop")
+                break
+
+            # Write patched script
+            try:
+                with open(script_path, "w") as f:
+                    f.write(fixed_script)
+                logger.info(f"Patched script written to {script_path}")
+            except Exception as e:
+                return self._finalize_failure(f"Cannot write patched script: {e}", state)
+
+            # Re-execute
+            exec_result = self._execute(script_path)
+            if exec_result.get("status") == "success":
+                if self.emitter:
+                    self.emitter.emit_thought(
+                        self.name,
+                        f"Training succeeded after debug attempt {attempt}!",
+                    )
+                return self._finalize_success(exec_result, state)
+
+            # Update error for next iteration
+            previous_errors.append(error_msg)
+            error_msg = self._extract_error(
+                exec_result, exec_result.get("status", "error")
+            )
+
+        # All attempts exhausted
+        all_errors = previous_errors + [error_msg]
+        exhaustion_msg = (
+            f"Training failed after {self.MAX_DEBUG_ITERATIONS} debug attempts.\n\n"
+            f"Last error:\n{error_msg[:1500]}"
+        )
+        return self._finalize_failure(exhaustion_msg, state)
+
+    # ------------------------------------------------------------------
+    # Execution helper
+    # ------------------------------------------------------------------
+    def _execute(self, script_path: str) -> dict:
+        """Run the training script and return the result dict."""
+        if self.emitter:
+            self.emitter.emit_tool_call(
+                self.name,
+                "execute_training_script",
+                {"script_path": script_path, "timeout": 3600},
+            )
+
+        result = execute_training_script.invoke(
+            {"script_path": script_path, "timeout": 3600}
+        )
+
+        status = result.get("status", "error")
+        if self.emitter:
+            # Emit full stdout so the log and UI show training details
+            # (epochs, metrics, etc.) — mimics the old LLM-agent behavior
+            # where tool results appeared as "thinking" events.
+            stdout = result.get("stdout", "")
+            if stdout:
+                self.emitter.emit_tool_result(
+                    self.name, "execute_training_script",
+                    f"{status}\n\n{stdout}"
+                )
+            else:
+                self.emitter.emit_tool_result(
+                    self.name, "execute_training_script", status
+                )
+
+        return result
+
+    # ------------------------------------------------------------------
+    # LLM Self-Debug (only called on failure)
+    # ------------------------------------------------------------------
+    def _llm_debug(
+        self,
+        script: str,
+        error: str,
+        state: PipelineState,
+        attempt: int,
+        previous_errors: list,
+    ) -> Optional[str]:
+        """Invoke LLM to analyze error and produce a fixed script.
+
+        Follows the Self-Debugging approach (Chen et al., ICLR 2024):
+        feed traceback + code → LLM explains error → outputs complete fixed script.
+        """
+        from langchain_core.messages import SystemMessage, HumanMessage
+        from plexe.langgraph.config import get_llm_from_model_id
+        from plexe.langgraph.prompts.operation import (
+            SELF_DEBUG_SYSTEM_PROMPT,
+            SELF_DEBUG_PROMPT,
+        )
+
+        model_id = self.config.get_model_for_agent("operation")
+        llm = get_llm_from_model_id(model_id, temperature=0.1)
+
+        # Build previous-errors context
+        prev_ctx = ""
+        if previous_errors:
+            prev_ctx = "\n\nPrevious failed attempts:\n"
+            for i, err in enumerate(previous_errors, 1):
+                prev_ctx += f"\n--- Attempt {i} error ---\n{err[:500]}\n"
+
+        working_dir = state.get("working_dir", ".")
+        script_path = state.get(
+            "training_script_path", os.path.join(working_dir, "train_script.py")
+        )
+        task_info = state.get("task_info") or {}
+        task_type = task_info.get("task_type", "unknown") if isinstance(task_info, dict) else "unknown"
+
+        prompt = SELF_DEBUG_PROMPT.format(
+            script=script,
+            error=error,
+            script_path=script_path,
+            task_type=task_type,
+            attempt=attempt,
+            max_attempts=self.MAX_DEBUG_ITERATIONS,
+            previous_errors=prev_ctx,
+        )
+
+        try:
+            response = llm.invoke([
+                SystemMessage(content=SELF_DEBUG_SYSTEM_PROMPT),
+                HumanMessage(content=prompt),
+            ])
+
+            # Track token usage
+            if self.token_tracker and hasattr(response, "usage_metadata"):
+                usage = response.usage_metadata or {}
+                self.token_tracker.record(
+                    "OperationAgent-debug",
+                    usage.get("input_tokens", 0),
+                    usage.get("output_tokens", 0),
+                )
+                if self.emitter:
+                    self.emitter.emit_token_update(
+                        "OperationAgent-debug",
+                        self.token_tracker.summary(),
+                    )
+
+            return self._extract_code_block(response.content)
+
+        except Exception as e:
+            logger.error(f"LLM debug call failed: {e}")
+            return None
+
+    @staticmethod
+    def _extract_code_block(text: str) -> Optional[str]:
+        """Extract Python code from markdown code block in LLM response."""
+        # Try ```python ... ``` first
+        match = re.search(r"```python\s*\n(.*?)```", text, re.DOTALL)
+        if match:
+            return match.group(1).strip()
+        # Fallback: ``` ... ```
+        match = re.search(r"```\s*\n(.*?)```", text, re.DOTALL)
+        if match:
+            return match.group(1).strip()
+        return None
+
+    # ------------------------------------------------------------------
+    # Error extraction
+    # ------------------------------------------------------------------
+    @staticmethod
+    def _extract_error(exec_result: dict, status: str) -> str:
+        """Extract the most useful error message from execution results.
+
+        Python tracebacks appear at the *end* of stderr, but stderr often
+        starts with thousands of characters of harmless warnings.  This method
+        searches for the traceback first, then falls back to the tail.
+        """
+        # 1. Explicit "error" key (set on exceptions/timeouts)
+        if exec_result.get("error"):
+            return exec_result["error"]
+
+        stderr = exec_result.get("stderr", "")
+        stdout = exec_result.get("stdout", "")
+
+        # 2. Traceback in stderr
+        tb = re.search(r"(Traceback \(most recent call last\):.*)", stderr, re.DOTALL)
+        if tb:
+            return tb.group(1).strip()
+
+        # 3. Traceback in stdout
+        tb = re.search(r"(Traceback \(most recent call last\):.*)", stdout, re.DOTALL)
+        if tb:
+            return tb.group(1).strip()
+
+        # 4. Tail of stderr
+        if stderr:
+            return f"(stderr tail)\n{stderr[-1500:]}"
+
+        # 5. Tail of stdout
+        if stdout:
+            return f"(stdout tail)\n{stdout[-1500:]}"
+
+        return f"Training failed with status: {status}"
+
+    # ------------------------------------------------------------------
+    # Finalization helpers
+    # ------------------------------------------------------------------
+    def _finalize_success(self, exec_result: dict, state: PipelineState) -> Dict[str, Any]:
+        """Build the success return dict from execution results."""
+        working_dir = state.get("working_dir", ".")
+        script_path = state.get(
+            "training_script_path", os.path.join(working_dir, "train_script.py")
+        )
+
+        # Read training results
         results_path = os.path.join(working_dir, "training_results.json")
-        
-        # Check if training was executed and results are available
+        training_results = {}
         if os.path.exists(results_path):
             try:
                 with open(results_path) as f:
                     training_results = json.load(f)
-                
-                base_result["training_result"] = {
-                    "metrics": training_results,
-                    "model_path": training_results.get("model_path"),
-                    "script_path": os.path.join(working_dir, "train_script.py"),
-                }
-                logger.info(f"Training results processed: {training_results}")
+                logger.info(f"Training results loaded: {training_results}")
             except Exception as e:
                 logger.warning(f"Could not read training results: {e}")
-                base_result["active_errors"] = [f"Failed to read training results: {e}"]
-        
-        # Mark pipeline as completed
-        base_result["current_phase"] = PipelinePhase.COMPLETED.value
-        
-        return base_result
-    
+        else:
+            training_results = exec_result.get("training_results", {})
+
+        summary = self._build_summary(training_results, working_dir)
+
+        if self.emitter:
+            self.emitter.emit_agent_end(self.name, summary)
+
+        return {
+            "messages": [
+                {
+                    "role": "assistant",
+                    "content": summary,
+                    "timestamp": datetime.now().isoformat(),
+                }
+            ],
+            "training_result": {
+                "metrics": training_results,
+                "model_path": training_results.get(
+                    "model_path", os.path.join(working_dir, "best_model.pt")
+                ),
+                "script_path": script_path,
+            },
+            "current_phase": PipelinePhase.COMPLETED.value,
+        }
+
+    def _finalize_success_from_state(self, state: PipelineState) -> Dict[str, Any]:
+        """Finalize when training_result already exists in state."""
+        working_dir = state.get("working_dir", ".")
+        summary = self._build_summary(
+            state["training_result"].get("metrics", {}), working_dir
+        )
+        if self.emitter:
+            self.emitter.emit_agent_end(self.name, summary)
+        return {
+            "messages": [
+                {
+                    "role": "assistant",
+                    "content": summary,
+                    "timestamp": datetime.now().isoformat(),
+                }
+            ],
+            "current_phase": PipelinePhase.COMPLETED.value,
+        }
+
+    def _finalize_failure(self, error_msg: str, state: PipelineState) -> Dict[str, Any]:
+        """Build the failure return dict."""
+        logger.error(f"Training failed: {error_msg[:500]}")
+        if self.emitter:
+            self.emitter.emit_agent_end(self.name, f"Training failed: {error_msg[:500]}")
+        return {
+            "messages": [
+                {
+                    "role": "assistant",
+                    "content": f"Training failed.\n\n{error_msg[:1500]}",
+                    "timestamp": datetime.now().isoformat(),
+                }
+            ],
+            "active_errors": [f"Training failed: {error_msg[:500]}"],
+            "current_phase": PipelinePhase.FAILED.value,
+        }
+
+    # ------------------------------------------------------------------
+    # Summary builder (pure Python, no LLM)
+    # ------------------------------------------------------------------
+    def _build_summary(self, training_results: dict, working_dir: str) -> str:
+        model_path = training_results.get(
+            "model_path", os.path.join(working_dir, "best_model.pt")
+        )
+        tune_metric = training_results.get("tune_metric", "")
+        epochs = training_results.get("epochs_trained", "N/A")
+
+        lines = [
+            "## Training Complete",
+            "",
+            f"**Model**: `{model_path}`",
+            f"**Epochs trained**: {epochs}",
+        ]
+
+        if tune_metric:
+            best_val = training_results.get(f"best_val_{tune_metric}", "N/A")
+            lines.append(f"**Tuning metric**: {tune_metric} = {best_val}")
+
+        val_metrics = training_results.get("val_metrics", {})
+        if val_metrics:
+            lines.append("")
+            lines.append("### Validation Metrics")
+            for k, v in val_metrics.items():
+                lines.append(f"  - {k}: {v}")
+
+        test_metrics = training_results.get("test_metrics", {})
+        if test_metrics:
+            lines.append("")
+            lines.append("### Test Metrics")
+            for k, v in test_metrics.items():
+                lines.append(f"  - {k}: {v}")
+
+        lines.append("")
+        lines.append("### Generated Artifacts")
+        for fname in [
+            "dataset.py",
+            "task.py",
+            "train_script.py",
+            "best_model.pt",
+            "training_results.json",
+        ]:
+            fpath = os.path.join(working_dir, fname)
+            exists = os.path.exists(fpath)
+            marker = "+" if exists else "-"
+            lines.append(f"  {marker} `{fpath}`")
+
+        return "\n".join(lines)
+
+    # ------------------------------------------------------------------
+    # Inference code generation (unchanged)
+    # ------------------------------------------------------------------
     def generate_inference_code(self, state: PipelineState) -> str:
         """Generate inference code for the trained model."""
         working_dir = state.get("working_dir", ".")
-        # Safely get task_type - handle None case explicitly
         task_info = state.get("task_info")
         task_type = "regression"
         if task_info and isinstance(task_info, dict):
             task_type = task_info.get("task_type", "regression")
-        
+
         inference_code = f'''"""
 Auto-generated inference code for the trained GNN model.
 """
@@ -157,14 +462,12 @@ def load_model(model_path: str):
     from plexe.relbench.modeling.nn import HeteroEncoder, HeteroTemporalEncoder, HeteroGraphSAGE
     from plexe.relbench.modeling.graph import make_pkey_fkey_graph
     from plexe.relbench.modeling.utils import get_stype_proposal
-    
-    # Initialize dataset and task
+
     csv_dir = "{working_dir}/csv_files"
     dataset = GenDataset(csv_dir=csv_dir)
     task = GenTask(dataset)
     db = dataset.get_db()
-    
-    # Build graph
+
     col_to_stype_dict = get_stype_proposal(db)
     data, col_stats_dict = make_pkey_fkey_graph(
         db,
@@ -172,8 +475,7 @@ def load_model(model_path: str):
         text_embedder_cfg=None,
         cache_dir="{working_dir}/cache/",
     )
-    
-    # Recreate model architecture
+
     class GNNModel(torch.nn.Module):
         def __init__(self, data, col_stats_dict, hidden_channels=128, out_channels=1):
             super().__init__()
@@ -202,7 +504,7 @@ def load_model(model_path: str):
                 torch.nn.Dropout(0.2),
                 torch.nn.Linear(hidden_channels, out_channels),
             )
-        
+
         def forward(self, batch, entity_table):
             x_dict = self.encoder(batch.tf_dict)
             rel_time_dict = self.temporal_encoder(
@@ -212,42 +514,12 @@ def load_model(model_path: str):
                 x_dict[node_type] = x_dict[node_type] + rel_time_dict[node_type]
             x_dict = self.gnn(x_dict, batch.edge_index_dict)
             return self.head(x_dict[entity_table])
-    
+
     model = GNNModel(data, col_stats_dict)
     model.load_state_dict(torch.load(model_path))
     model.eval()
-    
+
     return model, data, task
-
-
-def predict(model, data, task, entities, timestamp):
-    """
-    Make predictions for given entities at a specific timestamp.
-    
-    Args:
-        model: Trained GNN model
-        data: HeteroData graph
-        task: Task definition
-        entities: List of entity IDs to predict for
-        timestamp: Prediction timestamp
-    
-    Returns:
-        Predictions for each entity
-    """
-    from plexe.relbench.modeling.graph import get_node_train_table_input
-    from torch_geometric.loader import NeighborLoader
-    import pandas as pd
-    
-    # Create prediction table
-    pred_df = pd.DataFrame({{
-        task.time_col: [pd.Timestamp(timestamp)] * len(entities),
-        task.entity_col: entities,
-    }})
-    
-    # Create loader
-    # ... (implementation depends on specific use case)
-    
-    return predictions
 
 
 if __name__ == "__main__":
@@ -255,5 +527,5 @@ if __name__ == "__main__":
     model, data, task = load_model(model_path)
     print("Model loaded successfully!")
 '''
-        
+
         return inference_code

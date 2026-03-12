@@ -21,16 +21,19 @@ logger = logging.getLogger(__name__)
 class RelationalGNNSpecialistAgent(BaseAgent):
     """
     Agent for GNN training script generation with Training-Free HPO.
-    
+
     This agent uses MCP (Model Context Protocol) to access external
     knowledge sources for hyperparameter optimization without training.
     MCP tools are loaded automatically via MCPManager in BaseAgent.
     """
+
+    USE_MCP = True  # This agent needs MCP tools for HPO search
     
     def __init__(
         self,
         config: Optional[AgentConfig] = None,
         additional_tools: Optional[List[BaseTool]] = None,
+        token_tracker=None,
     ):
         # Core GNN-specific tools (non-MCP)
         # NOTE: save_artifact is intentionally excluded to prevent the LLM from
@@ -38,14 +41,15 @@ class RelationalGNNSpecialistAgent(BaseAgent):
         tools = [
             generate_training_script,
         ]
-        
+
         if additional_tools:
             tools.extend(additional_tools)
-        
+
         super().__init__(
             agent_type="gnn_specialist",
             config=config,
             tools=tools,
+            token_tracker=token_tracker,
         )
     
     @property

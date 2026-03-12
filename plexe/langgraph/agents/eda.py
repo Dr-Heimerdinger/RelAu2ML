@@ -36,6 +36,7 @@ class EDAAgent(BaseAgent):
         self,
         config: Optional[AgentConfig] = None,
         additional_tools: Optional[List[BaseTool]] = None,
+        token_tracker=None,
     ):
         tools = [
             validate_db_connection,
@@ -47,14 +48,15 @@ class EDAAgent(BaseAgent):
             analyze_table_relationships,
             generate_eda_summary,
         ]
-        
+
         if additional_tools:
             tools.extend(additional_tools)
-        
+
         super().__init__(
             agent_type="eda",
             config=config,
             tools=tools,
+            token_tracker=token_tracker,
         )
     
     @property

@@ -216,29 +216,3 @@ docker compose -f docker-compose.dev.yml up -d
 | `/api/models/` | GET | List trained models |
 | `/api/models/{id}/infer` | POST | Run inference on a trained model |
 | `/api/models/{id}/download` | GET | Download trained model |
-
-## How It Works
-
-1. **Describe your task** in natural language (e.g., "Predict whether F1 drivers will finish in the top 3")
-2. **Upload data** as CSV files or provide a PostgreSQL connection string
-3. The pipeline automatically:
-   - Analyzes schema, relationships, and temporal patterns
-   - Generates a `Dataset` class that loads and links your tables
-   - Generates a `Task` class with SQL that defines the prediction target
-   - Searches academic literature and Kaggle for optimal hyperparameters
-   - Trains a Graph Neural Network and reports metrics
-4. **Download** the trained model or run inference via the API
-
-## Technology Stack
-
-- **Orchestration**: LangGraph, LangChain
-- **LLM Providers**: OpenAI, Anthropic, Google Gemini (via LiteLLM)
-- **ML**: PyTorch, PyTorch Geometric, scikit-learn
-- **Data**: DuckDB (SQL execution), pandas, pyarrow
-- **Serving**: FastAPI, uvicorn, WebSockets
-- **Tracking**: MLflow
-- **External Tools**: MCP (Model Context Protocol)
-
-## License
-
-Apache 2.0

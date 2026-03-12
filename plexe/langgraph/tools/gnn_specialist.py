@@ -294,7 +294,12 @@ for epoch in range(1, {epochs} + 1):
         loss_accum += loss.detach().item() * pred.size(0)
         count_accum += pred.size(0)
 
-    train_loss = loss_accum / count_accum
+    train_loss = loss_accum / max(count_accum, 1)
+
+    # Guard: NaN loss indicates data or numerical issues
+    if math.isnan(train_loss) or math.isinf(train_loss):
+        print(f"Warning: NaN/Inf loss at epoch {{epoch}}, stopping early")
+        break
 
     # Validate using task.evaluate()
     model.eval()
@@ -305,6 +310,14 @@ for epoch in range(1, {epochs} + 1):
             pred = model(batch, entity_table)
             pred = pred.view(-1) if pred.size(1) == 1 else pred
             val_pred_list.append(pred.detach().cpu())
+
+    # Guard: empty validation set
+    if len(val_pred_list) == 0:
+        empty_m = {{}}
+        print(f"Epoch {{epoch}}/{epochs}: Loss={{train_loss:.4f}}, Val metrics: {{empty_m}}")
+        print(f"  Warning: Validation produced 0 predictions, skipping metric computation")
+        state_dict = copy.deepcopy(model.state_dict())
+        continue
 
     val_pred = torch.cat(val_pred_list, dim=0).numpy()
     val_metrics = task.evaluate(val_pred, val_table)
@@ -324,7 +337,9 @@ for epoch in range(1, {epochs} + 1):
         print(f"  -> New best model! {{tune_metric}}={{best_val_metric:.4f}}")
 
 # --- Final Evaluation ---
-assert state_dict is not None, "No best model found during training"
+if state_dict is None:
+    print("Warning: No best model found during training, using final model state")
+    state_dict = copy.deepcopy(model.state_dict())
 model.load_state_dict(state_dict)
 model.eval()
 
@@ -337,9 +352,13 @@ with torch.no_grad():
         pred = pred.view(-1) if pred.size(1) == 1 else pred
         val_pred_list.append(pred.detach().cpu())
 
-val_pred = torch.cat(val_pred_list, dim=0).numpy()
-val_metrics = task.evaluate(val_pred, val_table)
-print(f"\\nBest Val metrics: {{val_metrics}}")
+val_metrics = {{}}
+if len(val_pred_list) > 0:
+    val_pred = torch.cat(val_pred_list, dim=0).numpy()
+    val_metrics = task.evaluate(val_pred, val_table)
+    print(f"\\nBest Val metrics: {{val_metrics}}")
+else:
+    print("\\nWarning: No validation predictions available")
 
 # Test evaluation
 test_pred_list = []
@@ -350,9 +369,13 @@ with torch.no_grad():
         pred = pred.view(-1) if pred.size(1) == 1 else pred
         test_pred_list.append(pred.detach().cpu())
 
-test_pred = torch.cat(test_pred_list, dim=0).numpy()
-test_metrics = task.evaluate(test_pred)
-print(f"Best Test metrics: {{test_metrics}}")
+test_metrics = {{}}
+if len(test_pred_list) > 0:
+    test_pred = torch.cat(test_pred_list, dim=0).numpy()
+    test_metrics = task.evaluate(test_pred)
+    print(f"Best Test metrics: {{test_metrics}}")
+else:
+    print("Warning: No test predictions available")
 
 # --- Save model & results ---
 torch.save(state_dict, "{working_dir}/best_model.pt")

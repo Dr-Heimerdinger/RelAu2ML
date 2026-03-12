@@ -36,7 +36,7 @@ const PIPELINE_STAGES = [
     { key: 'complete', label: 'Complete', Icon: CheckCircle2 },
 ]
 
-const PipelineProgress = ({ messages }) => {
+const PipelineProgress = ({ messages, cumulativeTokens }) => {
     const [collapsed, setCollapsed] = useState(false)
 
     const stageStatus = useMemo(() => {
@@ -103,6 +103,15 @@ const PipelineProgress = ({ messages }) => {
                     <CircleDot size={14} />
                     <span>Pipeline Progress</span>
                     <span className="pipeline-percent">{progressPercent}%</span>
+                    {cumulativeTokens && cumulativeTokens.total > 0 && (
+                        <span className="cumulative-token-counter" title="Cumulative tokens used across all agents">
+                            <Coins size={12} />
+                            <span>{cumulativeTokens.total.toLocaleString()}</span>
+                            {cumulativeTokens.budget && (
+                                <span className="token-budget-label">/ {cumulativeTokens.budget.toLocaleString()}</span>
+                            )}
+                        </span>
+                    )}
                 </div>
                 {collapsed ? <ChevronDown size={16} /> : <ChevronUp size={16} />}
             </button>
@@ -445,6 +454,9 @@ const groupMessagesByAgent = (messages) => {
     let currentGroup = null
 
     messages.forEach((msg) => {
+        // Skip token_update events — they're consumed by the cumulative counter only
+        if (msg.event_type === 'token_update') return
+
         if (msg.role === 'thinking') {
             const agentName = msg.agent_name || 'Agent'
 
@@ -864,6 +876,16 @@ export default function Chat({ messages, status, isProcessing, onSendMessage, on
 
     const messageGroups = groupMessagesByAgent(messages)
 
+    // Extract latest cumulative token usage from token_update events
+    const cumulativeTokens = useMemo(() => {
+        for (let i = messages.length - 1; i >= 0; i--) {
+            if (messages[i].event_type === 'token_update' && messages[i].cumulative_tokens) {
+                return messages[i].cumulative_tokens
+            }
+        }
+        return null
+    }, [messages])
+
     return (
         <div className="chat-root">
             {confirmationRequest && (
@@ -874,7 +896,7 @@ export default function Chat({ messages, status, isProcessing, onSendMessage, on
                 />
             )}
             <div className={`status ${getStatusClass()}`}>{getStatusText()}</div>
-            <PipelineProgress messages={messages} />
+            <PipelineProgress messages={messages} cumulativeTokens={cumulativeTokens} />
             <div className="messages">
                 {messageGroups.map((group, i) => {
                     if (group.type === 'message') {

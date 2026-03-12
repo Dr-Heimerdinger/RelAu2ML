@@ -38,11 +38,12 @@ def extract_text_content(content) -> str:
 
 class AgentCallbackHandler(BaseCallbackHandler):
     """Callback handler for agent events with detailed chain-of-thought."""
-    
-    def __init__(self, agent_name: str, emitter: Optional[BaseEmitter] = None, model_id: str = ""):
+
+    def __init__(self, agent_name: str, emitter: Optional[BaseEmitter] = None, model_id: str = "", token_tracker=None):
         self.agent_name = agent_name
         self.emitter = emitter
         self.model_id = model_id
+        self.token_tracker = token_tracker
         self.current_thought = ""
         self._llm_start_emitted = False
         self._last_emitted_text = ""  # Track to avoid duplicate emissions
@@ -144,11 +145,23 @@ class AgentCallbackHandler(BaseCallbackHandler):
                             'total_tokens': usage.get('total_tokens', 0)
                         }
             
+            # Record in cumulative token tracker and emit update
+            if token_usage and self.token_tracker:
+                self.token_tracker.record(
+                    self.agent_name,
+                    token_usage.get('prompt_tokens', 0),
+                    token_usage.get('completion_tokens', 0),
+                )
+                if self.emitter:
+                    self.emitter.emit_token_update(
+                        self.agent_name, self.token_tracker.summary()
+                    )
+
             if thinking_text:
                 self.emitter.emit_thought(self.agent_name, f"💭 Reasoning{model_info}:\n{display_text}", token_usage)
             else:
                 self.emitter.emit_thought(self.agent_name, f"💡 Analysis{model_info}:\n{display_text}", token_usage)
-                
+
         except Exception as e:
             logger.debug(f"Error extracting LLM response: {e}")
     
@@ -181,43 +194,52 @@ class AgentCallbackHandler(BaseCallbackHandler):
 
 class BaseAgent(ABC):
     """Base class for all LangGraph agents."""
-    
+
+    USE_MCP = False  # Subclasses that need MCP tools should set this to True
+
     def __init__(
         self,
         agent_type: str,
         config: Optional[AgentConfig] = None,
         tools: Optional[List[BaseTool]] = None,
         emitter: Optional[BaseEmitter] = None,
+        token_tracker=None,
     ):
         """
         Initialize the base agent.
-        
+
         Args:
             agent_type: Type identifier for this agent
             config: Agent configuration (uses defaults if None)
             tools: List of tools available to this agent
             emitter: Optional emitter for progress callbacks
+            token_tracker: Optional TokenTracker for cumulative usage tracking
         """
         self.agent_type = agent_type
         self.config = config or AgentConfig.from_env()
         self.emitter = emitter
+        self.token_tracker = token_tracker
         self.tools = tools or []
-        
-        self.mcp_manager = MCPManager()
-        try:
-            self.mcp_manager.initialize_sync(timeout=30)
-            mcp_tools = self.mcp_manager.get_tools()
-            if mcp_tools:
-                logger.info(f"Agent {self.name} loaded {len(mcp_tools)} MCP tools")
-                self.tools.extend(mcp_tools)
-        except Exception as e:
-            logger.warning(f"Could not load MCP tools for {self.name}: {e}")
-            
+
+        self.mcp_manager = None
+        if self.USE_MCP:
+            self.mcp_manager = MCPManager()
+            try:
+                self.mcp_manager.initialize_sync(timeout=30)
+                mcp_tools = self.mcp_manager.get_tools()
+                if mcp_tools:
+                    logger.info(f"Agent {self.name} loaded {len(mcp_tools)} MCP tools")
+                    self.tools.extend(mcp_tools)
+            except Exception as e:
+                logger.warning(f"Could not load MCP tools for {self.name}: {e}")
+
         self.model_id = self.config.get_model_for_agent(agent_type)
         self.llm = get_llm_from_model_id(self.model_id, self.config.temperature)
-        
+
         self._agent = None
-        self._callback_handler = AgentCallbackHandler(self.name, emitter, self.model_id)
+        self._callback_handler = AgentCallbackHandler(
+            self.name, emitter, self.model_id, token_tracker=self.token_tracker
+        )
     
     @property
     @abstractmethod
@@ -238,7 +260,9 @@ class BaseAgent(ABC):
     def set_emitter(self, emitter: BaseEmitter):
         """Set the emitter for progress callbacks."""
         self.emitter = emitter
-        self._callback_handler = AgentCallbackHandler(self.name, emitter, self.model_id)
+        self._callback_handler = AgentCallbackHandler(
+            self.name, emitter, self.model_id, token_tracker=self.token_tracker
+        )
     
     def get_agent(self):
         """Get or create the LangGraph agent."""
@@ -360,26 +384,59 @@ class BaseAgent(ABC):
                 "error_history": [f"{self.name} [{type(e).__name__}]: {str(e)}"],
             }
     
+    MAX_CONTEXT_MESSAGES = 10
+
     def _build_messages(self, state: PipelineState) -> List:
-        """Build message list from state."""
+        """Build message list from state with windowed history.
+
+        Keeps the first user message (original intent) plus the last
+        MAX_CONTEXT_MESSAGES messages. Earlier messages are replaced
+        with a count marker to save tokens.
+        """
+        max_msgs = getattr(self.config, "max_context_messages", self.MAX_CONTEXT_MESSAGES)
         messages = [SystemMessage(content=self.system_prompt)]
-        
-        for msg in state.get("messages", []):
-            role = msg.get("role", "user")
-            content = msg.get("content", "")
-            
-            if role == "user":
-                messages.append(HumanMessage(content=content))
-            elif role == "assistant":
-                messages.append(AIMessage(content=content))
-            elif role == "system":
-                messages.append(SystemMessage(content=content))
-        
+
+        all_msgs = state.get("messages", [])
+
+        if len(all_msgs) <= max_msgs:
+            for msg in all_msgs:
+                messages.append(self._convert_message(msg))
+        else:
+            # Always keep first user message (original intent)
+            first_user = next(
+                (m for m in all_msgs if m.get("role") == "user"), None
+            )
+            if first_user:
+                messages.append(HumanMessage(content=first_user["content"]))
+
+            dropped = len(all_msgs) - max_msgs
+            messages.append(
+                SystemMessage(
+                    content=f"[{dropped} earlier messages omitted for context efficiency]"
+                )
+            )
+
+            for msg in all_msgs[-max_msgs:]:
+                messages.append(self._convert_message(msg))
+
         context = self._build_context(state)
         if context:
             messages.append(HumanMessage(content=f"Current context:\n{context}"))
-        
+
         return messages
+
+    @staticmethod
+    def _convert_message(msg: dict):
+        """Convert a state message dict to a LangChain message object."""
+        role = msg.get("role", "user")
+        content = msg.get("content", "")
+        if role == "user":
+            return HumanMessage(content=content)
+        elif role == "assistant":
+            return AIMessage(content=content)
+        elif role == "system":
+            return SystemMessage(content=content)
+        return HumanMessage(content=content)
     
     def _build_context(self, state: PipelineState) -> str:
         """Build context string from state for the agent."""

@@ -126,6 +126,7 @@ class PipelineState(TypedDict, total=False):
     training_result: Optional[TrainingResult]
     training_script_ready: Optional[bool]
     training_script_path: Optional[str]
+    selected_hyperparameters: Optional[Dict[str, Any]]
     
     generated_code: Dict[str, str]
     artifacts: List[str]
@@ -141,6 +142,7 @@ class PipelineState(TypedDict, total=False):
     user_confirmed: Optional[bool]
 
     metadata: Dict[str, Any]
+    token_usage_summary: Optional[Dict[str, Any]]
 
 
 def create_initial_state(
@@ -181,6 +183,7 @@ def create_initial_state(
         dataset_info=None,
         task_info=None,
         training_result=None,
+        selected_hyperparameters=None,
         generated_code={},
         artifacts=[],
         active_errors=[],
@@ -192,4 +195,5 @@ def create_initial_state(
         user_confirmation_context=None,
         user_confirmed=None,
         metadata={},
+        token_usage_summary=None,
     )

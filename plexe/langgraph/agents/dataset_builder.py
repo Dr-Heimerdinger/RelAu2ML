@@ -32,20 +32,22 @@ class DatasetBuilderAgent(BaseAgent):
         self,
         config: Optional[AgentConfig] = None,
         additional_tools: Optional[List[BaseTool]] = None,
+        token_tracker=None,
     ):
         tools = [
             get_csv_files_info,
             get_temporal_statistics,
             register_dataset_code,
         ]
-        
+
         if additional_tools:
             tools.extend(additional_tools)
-        
+
         super().__init__(
             agent_type="dataset_builder",
             config=config,
             tools=tools,
+            token_tracker=token_tracker,
         )
     
     @property

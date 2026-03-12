@@ -29,6 +29,7 @@ class TaskBuilderAgent(BaseAgent):
         self,
         config: Optional[AgentConfig] = None,
         additional_tools: Optional[List[BaseTool]] = None,
+        token_tracker=None,
     ):
         tools = [
             get_csv_files_info,
@@ -39,14 +40,15 @@ class TaskBuilderAgent(BaseAgent):
             test_sql_query,
             register_task_code,
         ]
-        
+
         if additional_tools:
             tools.extend(additional_tools)
-        
+
         super().__init__(
             agent_type="task_builder",
             config=config,
             tools=tools,
+            token_tracker=token_tracker,
         )
     
     @property

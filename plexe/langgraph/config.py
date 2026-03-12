@@ -67,6 +67,8 @@ class AgentConfig:
     gnn_specialist_model: str = field(default_factory=lambda: os.environ.get(
         "PLEXE_GNN_SPECIALIST_MODEL", "openai/gpt-4o"
     ))
+    # NOTE: operation_model is kept for backward compatibility but is no longer
+    # used. The OperationAgent now runs as a pure deterministic function (no LLM).
     operation_model: str = field(default_factory=lambda: os.environ.get(
         "PLEXE_OPERATION_MODEL", "openai/gpt-4o"
     ))
@@ -74,6 +76,14 @@ class AgentConfig:
     temperature: float = field(default_factory=lambda: float(os.environ.get(
         "PLEXE_AGENT_TEMPERATURE", "0.1"
     )))
+    max_context_messages: int = field(default_factory=lambda: int(os.environ.get(
+        "PLEXE_MAX_CONTEXT_MESSAGES", "10"
+    )))
+    token_budget: Optional[int] = field(default_factory=lambda: (
+        int(os.environ["PLEXE_TOKEN_BUDGET"])
+        if os.environ.get("PLEXE_TOKEN_BUDGET")
+        else None
+    ))
     max_retries: int = field(default_factory=lambda: int(os.environ.get(
         "PLEXE_MAX_RETRIES", "3"
     )))

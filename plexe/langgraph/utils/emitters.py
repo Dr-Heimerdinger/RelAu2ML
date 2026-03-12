@@ -72,6 +72,16 @@ class BaseEmitter(ABC):
         """
         pass  # Default no-op; subclasses override
 
+    def emit_token_update(self, agent_name: str, cumulative: Dict[str, Any]):
+        """Emit cumulative token usage update for real-time UI display.
+
+        Args:
+            agent_name: Name of the agent that triggered the update
+            cumulative: Dict with keys: total, total_input_tokens,
+                total_output_tokens, budget, per_agent
+        """
+        pass  # Default no-op; subclasses override
+
 
 class ConsoleEmitter(BaseEmitter):
     """Console-based emitter for development/debugging with rich formatting."""
@@ -133,6 +143,12 @@ class ConsoleEmitter(BaseEmitter):
             print(f"[{agent_name}] Training [{phase}] Epoch {epoch}/{total}{loss_str} - {msg}")
         else:
             print(f"[{agent_name}] Training [{phase}] {msg}")
+
+    def emit_token_update(self, agent_name: str, cumulative: Dict[str, Any]):
+        total = cumulative.get("total", 0)
+        budget = cumulative.get("budget")
+        budget_str = f" / {budget:,}" if budget else ""
+        print(f"[TokenTracker] Cumulative: {total:,}{budget_str} tokens (after {agent_name})")
 
 
 class WebSocketEmitter(BaseEmitter):
@@ -291,6 +307,25 @@ class WebSocketEmitter(BaseEmitter):
             agent_name,
         )
 
+    def emit_token_update(self, agent_name: str, cumulative: Dict[str, Any]):
+        total = cumulative.get("total", 0)
+        budget = cumulative.get("budget")
+        budget_str = f" / {budget:,}" if budget else ""
+        self._send_message({
+            "type": "thinking",
+            "role": "thinking",
+            "event_type": "token_update",
+            "agent_name": agent_name,
+            "cumulative_tokens": cumulative,
+            "message": f"Tokens used: {total:,}{budget_str}",
+            "timestamp": datetime.now().strftime("%H:%M:%S"),
+        })
+        log_session_event(
+            "token_update",
+            f"Cumulative: {total:,}{budget_str} tokens (after {agent_name})",
+            agent_name,
+        )
+
 
 class MultiEmitter(BaseEmitter):
     """Combines multiple emitters."""
@@ -337,5 +372,12 @@ class MultiEmitter(BaseEmitter):
         for emitter in self.emitters:
             try:
                 emitter.emit_training_progress(agent_name, progress_data)
+            except Exception as e:
+                logger.warning(f"Emitter error: {e}")
+
+    def emit_token_update(self, agent_name: str, cumulative: Dict[str, Any]):
+        for emitter in self.emitters:
+            try:
+                emitter.emit_token_update(agent_name, cumulative)
             except Exception as e:
                 logger.warning(f"Emitter error: {e}")

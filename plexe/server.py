@@ -6,6 +6,7 @@ and serves the frontend for the Plexe ML platform.
 """
 
 import asyncio
+import concurrent.futures
 import json
 import logging
 import uuid
@@ -76,6 +77,12 @@ class SessionManager:
 
 
 session_manager = SessionManager()
+
+# Dedicated thread pool for pipeline execution so training doesn't starve the
+# default asyncio executor (which is also used for I/O and other services).
+pipeline_executor = concurrent.futures.ThreadPoolExecutor(
+    max_workers=4, thread_name_prefix="plexe-pipeline"
+)
 
 
 @app.get("/")
@@ -197,7 +204,7 @@ async def websocket_endpoint(websocket: WebSocket):
                 finally:
                     thread_loop.close()
             
-            result = await loop.run_in_executor(None, run_sync)
+            result = await loop.run_in_executor(pipeline_executor, run_sync)
             
             response_text = ""
             if result.get("status") == "success":

@@ -27,19 +27,21 @@ class ConversationalAgent(BaseAgent):
         self,
         config: Optional[AgentConfig] = None,
         additional_tools: Optional[List[BaseTool]] = None,
+        token_tracker=None,
     ):
         tools = [
             get_dataset_preview,
             validate_db_connection,
         ]
-        
+
         if additional_tools:
             tools.extend(additional_tools)
-        
+
         super().__init__(
             agent_type="conversational",
             config=config,
             tools=tools,
+            token_tracker=token_tracker,
         )
     
     @property
