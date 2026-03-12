@@ -2,19 +2,21 @@ import { defineConfig } from 'vite'
 import react from '@vitejs/plugin-react'
 
 // Use environment variable for backend URL, defaulting to Docker service name
-// When running in Docker, use 'backend:8100'. When running locally, use 'localhost:8100'
+// When running in Docker, use 'backend:BACKEND_PORT'. When running locally, use 'localhost:BACKEND_PORT'
 const backendHost = process.env.VITE_BACKEND_HOST || 'backend'
-const backendUrl = `http://${backendHost}:8100`
+const backendPort = process.env.VITE_BACKEND_PORT || '8100'
+const backendUrl = `http://${backendHost}:${backendPort}`
+const frontendPort = parseInt(process.env.VITE_FRONTEND_PORT || '3000')
 
 export default defineConfig({
     plugins: [react()],
     server: {
         host: '0.0.0.0',
-        port: 3000,
+        port: frontendPort,
         strictPort: false,
         hmr: {
             host: 'localhost',
-            port: 3000,
+            port: frontendPort,
             protocol: 'ws',
         },
         proxy: {

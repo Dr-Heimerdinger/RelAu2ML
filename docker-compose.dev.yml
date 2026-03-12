@@ -7,13 +7,13 @@ services:
   postgres:
     image: postgres:15
     environment:
-      POSTGRES_USER: ${POSTGRES_USER:-mlflow}
-      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-mlflow}
-      POSTGRES_DB: ${POSTGRES_DB:-mlflow_db}
+      POSTGRES_USER: ${POSTGRES_USER:-plexe}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-plexe}
+      POSTGRES_DB: ${POSTGRES_DB:-plexe_db}
     volumes:
       - postgres_data:/var/lib/postgresql/data
     ports:
-      - "5432:5432"
+      - "${POSTGRES_PORT:-5432}:5432"
     networks:
       - plexe-net
 
@@ -23,7 +23,7 @@ services:
       PGADMIN_DEFAULT_EMAIL: ${PGADMIN_EMAIL:-admin@example.com}
       PGADMIN_DEFAULT_PASSWORD: ${PGADMIN_PASSWORD:-admin}
     ports:
-      - "8080:80"
+      - "${PGADMIN_PORT:-8080}:80"
     networks:
       - plexe-net
 
@@ -37,9 +37,10 @@ services:
       - ./plexe/ui/frontend/vite.config.js:/app/vite.config.js
       - /app/node_modules
     ports:
-      - "3000:3000"
+      - "${FRONTEND_PORT:-3000}:3000"
     environment:
       VITE_BACKEND_URL: ${VITE_BACKEND_URL:-http://localhost:8000}
+      VITE_FRONTEND_PORT: ${FRONTEND_PORT:-3000}
     networks:
       - plexe-net
 
@@ -51,12 +52,13 @@ services:
       postgres:
         condition: service_started
     environment:
+      BACKEND_PORT: ${BACKEND_PORT:-8000}
       HF_TOKEN: ${HF_TOKEN}
       HUGGINGFACE_API_KEY: ${HUGGINGFACE_API_KEY}
     volumes:
       - .:/app
     ports:
-      - "8000:8000"
+      - "${BACKEND_PORT:-8000}:${BACKEND_PORT:-8000}"
     networks:
       - plexe-net
 

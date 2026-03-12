@@ -18,7 +18,7 @@ def main():
     """Launch the Plexe assistant with a web UI."""
     load_dotenv()
     host = "127.0.0.1"
-    port = 8000
+    port = int(os.environ.get("BACKEND_PORT", 8000))
 
     # If the user exported GEMINI_API_KEY but not GOOGLE_API_KEY, map it so
     # litellm/Google provider can pick it up (common naming mismatch).

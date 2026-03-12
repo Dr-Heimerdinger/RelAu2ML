@@ -88,4 +88,4 @@ from plexe.langgraph import EDAAgent, ConversationalAgent
 print("LangGraph agents OK")
 EOF
  
-CMD ["python", "-m", "uvicorn", "plexe.server:app", "--host", "0.0.0.0", "--port", "8100", "--reload", "--reload-dir", "plexe"]
+CMD ["sh", "-c", "python -m uvicorn plexe.server:app --host 0.0.0.0 --port ${BACKEND_PORT:-8100} --reload --reload-dir plexe"]
