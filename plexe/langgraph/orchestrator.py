@@ -171,8 +171,16 @@ class PlexeOrchestrator:
         )
         
         # Operation agent handles its own debug loop internally (up to 3
-        # LLM-powered attempts).  It always returns COMPLETED or FAILED.
-        workflow.add_edge("operation", END)
+        # LLM-powered attempts).  On success → END, on failure → error_handler
+        # which can route back to gnn_training to regenerate the script.
+        workflow.add_conditional_edges(
+            "operation",
+            self._route_from_operation,
+            {
+                "success": END,
+                "error": "error_handler",
+            }
+        )
         
         workflow.add_conditional_edges(
             "error_handler",
@@ -241,7 +249,7 @@ class PlexeOrchestrator:
         phase_max = self.config.retry_config.get(failed_phase, self.config.max_retries)
 
         if retry_count < phase_max:
-            return {
+            retry_state = {
                 "active_errors": [],
                 "error_records": [],
                 "error_history": [f"[retry {retry_count + 1}/{phase_max}] {e}" for e in active_errors],
@@ -249,6 +257,12 @@ class PlexeOrchestrator:
                 "metadata": {**metadata, "retry_count": retry_count + 1},
                 "warnings": [f"Retrying {failed_phase} after error (attempt {retry_count + 1}/{phase_max})"],
             }
+            # Clear operation-related flags when retrying via gnn_training
+            # so the GNN specialist regenerates the script from scratch
+            if failed_phase == PipelinePhase.OPERATION.value:
+                retry_state["training_script_ready"] = False
+                retry_state["training_result"] = None
+            return retry_state
 
         return {
             "current_phase": PipelinePhase.FAILED.value,
@@ -366,6 +380,16 @@ class PlexeOrchestrator:
             return "success"
         return "error"
     
+    def _route_from_operation(self, state: PipelineState) -> Literal["success", "error"]:
+        """Route from operation node."""
+        if state.get("active_errors"):
+            return "error"
+        if state.get("current_phase") == PipelinePhase.COMPLETED.value:
+            return "success"
+        if state.get("training_result"):
+            return "success"
+        return "error"
+
     def _route_from_error(self, state: PipelineState) -> str:
         """Route from error handler to the failed phase or END."""
         metadata = state.get("metadata") or {}
@@ -381,7 +405,7 @@ class PlexeOrchestrator:
             PipelinePhase.DATASET_BUILDING.value: "dataset_building",
             PipelinePhase.TASK_BUILDING.value: "task_building",
             PipelinePhase.GNN_TRAINING.value: "gnn_training",
-            PipelinePhase.OPERATION.value: "operation",
+            PipelinePhase.OPERATION.value: "gnn_training",  # re-generate script on operation failure
         }
         return phase_to_node.get(failed_phase, "conversation")
     

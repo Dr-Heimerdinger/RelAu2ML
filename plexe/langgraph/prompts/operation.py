@@ -27,6 +27,30 @@ Common training script errors and their fixes:
 - Import errors
   → Fix import paths, ensure modules are on PYTHONPATH
 
+## Key API Reference (DO NOT hallucinate methods not listed here)
+
+Database class:
+  - db.table_dict: Dict[str, Table]  (table_name -> Table object)
+  - NO other data-access methods exist (no get_column, get_table, __getitem__, etc.)
+
+Table class:
+  - table.df: pd.DataFrame  (the underlying data)
+  - table.pkey_col: Optional[str]  (primary key column name)
+  - table.fkey_col_to_pkey_table: Dict[str, str]  (fkey_col -> pkey_table_name)
+  - table.time_col: Optional[str]  (time column name)
+
+get_stype_proposal(db) -> Dict[str, Dict[str, stype]]:
+  - Returns nested dict: {table_name: {col_name: stype, ...}, ...}
+  - May misclassify time-like strings (e.g., "00:00:00") as categorical
+
+make_pkey_fkey_graph(db, col_to_stype_dict, text_embedder_cfg, cache_dir):
+  - col_to_stype_dict must be Dict[str, Dict[str, stype]] (same structure as get_stype_proposal output)
+  - Returns: (HeteroData, col_stats_dict)
+
+To access column data: db.table_dict["table_name"].df["column_name"]
+To override stype:     col_to_stype_dict["table_name"]["col"] = stype.numerical
+To drop a column:      del col_to_stype_dict["table_name"]["col"]
+
 CRITICAL RULES:
 - Output the COMPLETE fixed script inside ```python ... ``` code block
 - Do NOT output partial patches or diffs — output the ENTIRE script

@@ -83,6 +83,16 @@ class OperationAgent:
         error_msg = self._extract_error(exec_result, exec_result.get("status", "error"))
         previous_errors = []
 
+        # Cache the original script BEFORE entering the debug loop.
+        # Each debug iteration fixes the ORIGINAL, not the previous broken patch,
+        # to prevent error compounding (e.g. LLM introduces db.get_column() which
+        # doesn't exist, and all subsequent iterations inherit that bug).
+        try:
+            with open(script_path) as f:
+                original_script = f.read()
+        except Exception as e:
+            return self._finalize_failure(f"Cannot read script: {e}", state)
+
         for attempt in range(1, self.MAX_DEBUG_ITERATIONS + 1):
             logger.info(f"Self-debug attempt {attempt}/{self.MAX_DEBUG_ITERATIONS}")
             if self.emitter:
@@ -91,12 +101,8 @@ class OperationAgent:
                     f"Debug attempt {attempt}/{self.MAX_DEBUG_ITERATIONS}: analyzing error and patching script",
                 )
 
-            # Read current script
-            try:
-                with open(script_path) as f:
-                    current_script = f.read()
-            except Exception as e:
-                return self._finalize_failure(f"Cannot read script: {e}", state)
+            # Always debug from the original script to prevent error compounding
+            current_script = original_script
 
             # Ask LLM to fix
             fixed_script = self._llm_debug(
@@ -131,7 +137,14 @@ class OperationAgent:
                 exec_result, exec_result.get("status", "error")
             )
 
-        # All attempts exhausted
+        # All attempts exhausted — restore original script on disk so that
+        # orchestrator-level retry (via error_handler → gnn_training) starts clean.
+        try:
+            with open(script_path, "w") as f:
+                f.write(original_script)
+        except Exception:
+            pass  # best-effort restore
+
         all_errors = previous_errors + [error_msg]
         exhaustion_msg = (
             f"Training failed after {self.MAX_DEBUG_ITERATIONS} debug attempts.\n\n"
@@ -157,19 +170,21 @@ class OperationAgent:
 
         status = result.get("status", "error")
         if self.emitter:
-            # Emit full stdout so the log and UI show training details
-            # (epochs, metrics, etc.) — mimics the old LLM-agent behavior
-            # where tool results appeared as "thinking" events.
             stdout = result.get("stdout", "")
+            stderr = result.get("stderr", "")
+
+            # Build output: always include stdout; include stderr on failure
+            # (Python tracebacks appear in stderr and are critical for debugging)
+            parts = [status]
             if stdout:
-                self.emitter.emit_tool_result(
-                    self.name, "execute_training_script",
-                    f"{status}\n\n{stdout}"
-                )
-            else:
-                self.emitter.emit_tool_result(
-                    self.name, "execute_training_script", status
-                )
+                parts.append(stdout)
+            if stderr and status != "success":
+                parts.append(f"--- stderr ---\n{stderr}")
+
+            self.emitter.emit_tool_result(
+                self.name, "execute_training_script",
+                "\n\n".join(parts)
+            )
 
         return result
 
@@ -379,7 +394,7 @@ class OperationAgent:
                 }
             ],
             "active_errors": [f"Training failed: {error_msg[:500]}"],
-            "current_phase": PipelinePhase.FAILED.value,
+            "current_phase": PipelinePhase.OPERATION.value,
         }
 
     # ------------------------------------------------------------------
