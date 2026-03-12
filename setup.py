@@ -12,13 +12,13 @@ def run_command(command):
 
 def main():
     print("Installing dependencies...")
-    print("Note: This installs the lightweight version of plexe by default.")
     print("Available installation options:")
-    print("  poetry install                    # Default lightweight installation")
-    print("  poetry install -E lightweight     # Explicitly install lightweight version")
-    print("  poetry install -E all             # Full installation with deep learning support")
-    print("  poetry install -E deep-learning   # Only deep learning dependencies")
-    run_command("poetry install")
+    print("  uv sync                           # Default installation")
+    print("  uv sync --group dev               # Include dev dependencies")
+    print("  uv sync --extra all               # Full installation with deep learning + chatui")
+    print("  uv sync --extra transformers      # Only deep learning dependencies")
+    print("  uv sync --extra chatui            # Only chatui dependencies")
+    run_command("uv sync")
 
     print("Installing pre-commit hooks...")
     run_command("pre-commit install")

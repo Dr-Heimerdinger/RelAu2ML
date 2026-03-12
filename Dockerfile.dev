@@ -1,5 +1,5 @@
 # Lightweight Backend Dockerfile (Development)
-# Excludes torch and transformers for faster builds
+# Uses CPU torch for faster builds — no GPU required
 # Use this during development with: docker compose -f docker-compose.dev.yml build backend
 
 FROM python:3.11-slim as base
@@ -9,53 +9,54 @@ WORKDIR /app
 ENV PIP_DEFAULT_TIMEOUT=100 \
     PIP_RETRIES=5 \
     PYTHONUNBUFFERED=1 \
-    POETRY_NO_INTERACTION=1 \
-    POETRY_VIRTUALENVS_CREATE=false
+    UV_SYSTEM_PYTHON=1 \
+    UV_NO_CACHE=1
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
     git \
-    curl \  
+    curl \
     && rm -rf /var/lib/apt/lists/*
 
 FROM base as deps
 
-RUN pip install --no-cache-dir --upgrade pip setuptools wheel && \
-    pip install --no-cache-dir poetry
+RUN pip install --no-cache-dir uv
 
+COPY pyproject.toml README.md ./
 
-COPY pyproject.toml poetry.lock* README.md ./
+# Create minimal package stub so uv can resolve dependencies before source is copied
+# (enables Docker layer caching — this layer is reused unless pyproject.toml changes)
+RUN mkdir -p plexe && touch plexe/__init__.py
 
-# Install without torch (torch is optional for development)
-# This runs much faster!
-# Install chatui extras to ensure uvicorn has websocket support
-RUN poetry config virtualenvs.create false && \
-    poetry install --no-interaction --no-ansi --no-root --only main --extras chatui 2>&1 || \
-    (echo "First attempt failed, retrying..." && sleep 10 && poetry install --no-interaction --no-ansi --no-root --only main --extras chatui) || \
-    (echo "Second attempt failed, retrying with timeout increase..." && sleep 15 && poetry install --no-interaction --no-ansi --no-root --only main --extras chatui)
+# Install main deps + chatui (không gồm mlflow) để tách biệt layer
+RUN uv pip install ".[chatui]"
+ 
+# MLflow trong layer riêng — dễ rebuild nếu có conflict
+RUN uv pip install ".[mlflow]"
 
-# Force install torch CPU version to ensure compatibility with PyG dependencies
-RUN pip install torch==2.3.1 --index-url https://download.pytorch.org/whl/cpu
+# Force CPU torch (replaces default CUDA-capable torch with a smaller CPU wheel)
+RUN uv pip install torch==2.3.1 --index-url https://download.pytorch.org/whl/cpu
 
-# Install PyG dependencies (pyg_lib, etc.) for GNN support
-RUN pip install pyg_lib torch_scatter torch_sparse torch_cluster torch_spline_conv -f https://data.pyg.org/whl/torch-2.3.1+cpu.html
-
-
-# RUN pip install --no-cache-dir python-multipart
+# PyG C-extensions — only available from the PyG wheel index, not standard PyPI
+RUN pip install pyg_lib torch_scatter torch_sparse torch_cluster torch_spline_conv \
+    -f https://data.pyg.org/whl/torch-2.3.1+cpu.html
 
 FROM deps as app
 
 COPY . .
 
-RUN poetry config virtualenvs.create false && \
-    poetry install --no-interaction --no-ansi --only main --extras chatui 2>&1 || \
-    (echo "Retrying after delay..." && sleep 10 && poetry install --no-interaction --no-ansi --only main --extras chatui)
+# Re-install in editable mode (main + chatui)
+RUN uv pip install -e ".[chatui]"
+ 
+# Re-pin mlflow sau editable install
+RUN uv pip install ".[mlflow]"
 
-# Force reinstall torch and extensions to ensure compatibility (fix for poetry overwriting versions)
-RUN pip install torch==2.3.1 --index-url https://download.pytorch.org/whl/cpu && \
-    pip install pyg_lib torch_scatter torch_sparse torch_cluster torch_spline_conv -f https://data.pyg.org/whl/torch-2.3.1+cpu.html
+# Re-pin CPU torch + PyG extensions (guard against uv pulling a newer torch)
+RUN uv pip install torch==2.3.1 --index-url https://download.pytorch.org/whl/cpu && \
+    pip install pyg_lib torch_scatter torch_sparse torch_cluster torch_spline_conv \
+    -f https://data.pyg.org/whl/torch-2.3.1+cpu.html
 
-# Install sentence-transformers for text embeddings in GNN training
-RUN pip install sentence-transformers
+# sentence-transformers for text embeddings in GNN training
+RUN uv pip install sentence-transformers
 
 EXPOSE 8000
 

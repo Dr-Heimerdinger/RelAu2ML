@@ -80,60 +80,128 @@ plexe/
 
 ## Setup
 
-### 1. Environment Variables
+### Yêu cầu hệ thống
 
-Create a `.env` file or configure `docker-compose.gpu.yml`:
+- Python 3.11 hoặc 3.12
+- [uv](https://docs.astral.sh/uv/) (trình quản lý package và venv)
+- Docker + Docker Compose (cho triển khai container)
+- NVIDIA GPU + CUDA 12.8 (cho `docker-compose.gpu.yml`)
 
+Cài uv nếu chưa có:
+```bash
+curl -LsSf https://astral.sh/uv/install.sh | sh
+```
+
+### 1. Cấu hình biến môi trường
+
+Sao chép file mẫu và điền API keys:
+```bash
+cp .env.example .env
+```
+
+Các biến bắt buộc trong `.env`:
 ```env
-# LLM API Keys (at least one required)
-OPENAI_API_KEY=your_key
-GOOGLE_API_KEY=your_key
-ANTHROPIC_API_KEY=your_key
+# Ít nhất một LLM API key
+OPENAI_API_KEY=sk-...
+GOOGLE_API_KEY=...
+ANTHROPIC_API_KEY=...
 
-# Kaggle (required for Kaggle MCP tools)
+# Kaggle (cần thiết cho MCP tools tìm dataset)
 KAGGLE_USERNAME=your_username
 KAGGLE_KEY=your_api_key
 
-# Agent model selection (optional, defaults to openai/gpt-4o)
-PLEXE_CONVERSATIONAL_MODEL=openai/gpt-4o
-PLEXE_EDA_MODEL=gemini/gemini-2.5-flash
-PLEXE_DATASET_BUILDER_MODEL=openai/gpt-4o
-PLEXE_TASK_BUILDER_MODEL=openai/gpt-4o
+# Model cho từng agent (mặc định gemini-2.0-flash)
+PLEXE_ORCHESTRATOR_MODEL=gemini/gemini-2.0-flash-exp
+PLEXE_CONVERSATIONAL_MODEL=gemini/gemini-2.0-flash-exp
+PLEXE_EDA_MODEL=gemini/gemini-2.0-flash-exp
 PLEXE_GNN_SPECIALIST_MODEL=openai/gpt-4o
-PLEXE_OPERATION_MODEL=openai/gpt-4o
 
 # Pipeline settings
 PLEXE_AGENT_TEMPERATURE=0.1
-PLEXE_MAX_RETRIES=3
 PLEXE_VERBOSE=true
 ```
 
-### 2. Docker (GPU Production)
+### 2. Cài đặt local (không Docker)
 
 ```bash
-docker compose -f docker-compose.gpu.yml up -d
+# Clone repo
+git clone <repo-url>
+cd plexe
+
+# Cài đặt toàn bộ dependencies (uv tự tạo .venv)
+uv sync --extra all
+
+# Hoặc chỉ cài bản tối giản (không có transformers/chatui)
+uv sync
+
+# Kích hoạt venv
+source .venv/bin/activate
+
+# Chạy server
+python -m plexe
 ```
 
-This starts:
-- **Backend** (port 8100): FastAPI + WebSocket server with GPU support
-- **Frontend** (port 3000): React/Vite chat UI
-- **MLflow** (port 5000): Experiment tracking
-- **PostgreSQL**: MLflow backend store
-- **pgAdmin** (port 8080): Database administration
+> **Tip:** Sau lần đầu, chạy `uv lock` để tạo `uv.lock` rồi commit vào repo.
+> Khi clone ở máy khác, `uv sync` sẽ cài đúng phiên bản đã lock, đảm bảo reproducibility.
 
-### 3. Docker (CPU Development)
+Tùy chọn extras:
+| Lệnh | Bao gồm |
+|------|---------|
+| `uv sync` | Chỉ deps cơ bản |
+| `uv sync --extra chatui` | + FastAPI, uvicorn, websockets |
+| `uv sync --extra transformers` | + HuggingFace transformers, sentence-transformers |
+| `uv sync --extra all` | Tất cả các trên |
+| `uv sync --group dev` | + pytest, ruff, jupyterlab |
+
+### 3. Docker — GPU (Production)
+
+Yêu cầu: NVIDIA GPU, [nvidia-container-toolkit](https://docs.nvidia.com/datacenter/cloud-native/container-toolkit/install-guide.html).
+
+```bash
+# Build và start toàn bộ stack
+docker compose -f docker-compose.gpu.yml up -d
+
+# Xem logs
+docker compose -f docker-compose.gpu.yml logs -f backend
+```
+
+Services khởi động:
+| Service | Port | Mô tả |
+|---------|------|--------|
+| backend | 8100 | FastAPI + WebSocket (GPU) |
+| frontend | 3000 | React/Vite chat UI |
+| mlflow | 5000 | Experiment tracking |
+| postgres | 5432 | MLflow backend store |
+| pgadmin | 8080 | Quản lý database |
+
+### 4. Docker — CPU (Development)
 
 ```bash
 docker compose -f docker-compose.dev.yml up -d
 ```
 
-### 4. Local Development
+Backend chạy ở port **8000** (thay vì 8100), dùng CPU torch để build nhanh hơn.
+
+### 5. Chuẩn bị khi cài đặt tại máy mới
 
 ```bash
-python -m venv .venv
+# 1. Clone repo
+git clone <repo-url> && cd plexe
+
+# 2. Tạo .env từ mẫu
+cp .env.example .env
+# Điền API keys vào .env
+
+# 3a. Cài local (nếu không dùng Docker)
+uv sync --extra all          # uv.lock đảm bảo cài đúng phiên bản
 source .venv/bin/activate
-pip install -e ".[all]"
 python -m plexe
+
+# 3b. Chạy Docker GPU
+docker compose -f docker-compose.gpu.yml up -d
+
+# 3c. Chạy Docker CPU (dev)
+docker compose -f docker-compose.dev.yml up -d
 ```
 
 ## API Endpoints

@@ -33,19 +33,22 @@ ENV PYTHONUNBUFFERED=1 \
 # ----------------------------
 # BƯỚC 1: Copy dependency files
 # ----------------------------
-COPY pyproject.toml poetry.lock* README.md ./
+COPY pyproject.toml README.md ./
  
 # ----------------------------
-# BƯỚC 2: Install dependencies với uv (cài trực tiếp để đảm bảo đầy đủ)
+# BƯỚC 2: Install main + extras (không gồm mlflow) từ pyproject.toml
+# torch 2.7.0+cu128 trong base image thỏa mãn >=2.3.0,<3 — uv giữ nguyên
+# Tạo stub trước để Docker layer cache hoạt động khi chỉ pyproject.toml thay đổi
 # ----------------------------
-RUN uv pip install \
-        python-dotenv pandas imbalanced-learn pydantic scikit-learn seaborn \
-        dataclasses-json bandit joblib mlxtend xgboost tenacity pyarrow \
-        litellm statsmodels hypothesis "numpy<2.0.0" black jinja2 platformdirs \
-        "ray>=2.9.0" rich smolagents deprecated python-multipart psycopg2-binary \
-        featuretools sqlalchemy pytorch-frame pooch duckdb scipy \
-        fastapi "uvicorn[standard]" websockets langgraph langchain langchain-openai langchain-google-genai langchain-anthropic \
-        requests openml scholarly kaggle "mcp[all]" nest_asyncio tqdm
+RUN mkdir -p plexe && touch plexe/__init__.py
+RUN uv pip install ".[transformers,chatui]"
+ 
+# ----------------------------
+# BƯỚC 2b: Cài MLflow trong layer riêng biệt
+# mlflow >=3.0.0rc2 là pre-release, có thể conflict với numpy/pandas.
+# Layer riêng giúp dễ debug và rebuild nếu có conflict.
+# ----------------------------
+RUN uv pip install ".[mlflow]"
  
 # ----------------------------
 # BƯỚC 3: Cài torchvision, torchaudio (torch đã có sẵn từ base image)
@@ -60,27 +63,23 @@ RUN pip install pyg_lib torch_scatter torch_sparse torch_cluster torch_spline_co
     -f https://data.pyg.org/whl/torch-2.7.0+cu128.html
  
 # ----------------------------
-# BƯỚC 5: torch-geometric
+# BƯỚC 5: Extra packages không có trong pyproject.toml
+# NOTE: pytorch-frame đã được cài ở bước 2 từ pyproject.toml.
+# Do NOT install "torch-frame" — đó là package khác, sẽ overwrite pytorch-frame.
+# torch-geometric và sentence-transformers cũng đã được cài ở bước 2.
 # ----------------------------
-# NOTE: pytorch-frame (PyG tabular) is already installed in step 2.
-# Do NOT install "torch-frame" here — that's a different package (vision framework)
-# which overwrites pytorch-frame's torch_frame namespace.
-RUN uv pip install torch-geometric tensorboard
-
-# ----------------------------
-# BƯỚC 6: sentence-transformers (for text embeddings in GNN training)
-# ----------------------------
-RUN uv pip install sentence-transformers
-
-# ----------------------------
-# BƯỚC 7: MLflow
-# ----------------------------
-RUN uv pip install "mlflow>=2.14.0,<3.0.0"
+RUN uv pip install tensorboard torchvision torchaudio
  
 # ----------------------------
 # Source code
 # ----------------------------
 COPY . .
+
+# Re-install package in editable mode (main + extras, không gồm mlflow)
+RUN uv pip install -e ".[transformers,chatui]"
+ 
+# Re-pin mlflow sau editable install để tránh bị downgrade
+RUN uv pip install ".[mlflow]"
  
 # ----------------------------
 # Sanity check (build-time - GPU not available during build)
