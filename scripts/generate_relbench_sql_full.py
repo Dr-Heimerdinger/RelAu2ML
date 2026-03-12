@@ -331,7 +331,7 @@ Supported datasets:
     print(f"Downloading {dataset_name} dataset...")
     try:
         dataset = get_dataset(dataset_name, download=not args.no_download)
-        db = dataset.get_db()
+        db = dataset.get_db(upto_test_timestamp=False)
     except Exception as e:
         print(f"Error loading dataset: {e}")
         print(f"\nMake sure '{dataset_name}' is a valid RelBench dataset.")

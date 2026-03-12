@@ -175,7 +175,11 @@ class MCPManager:
         tool_name = tool_info.name
 
         async def tool_func_async(**kwargs):
-            result = await session.call_tool(tool_name, kwargs)
+            # Filter out None values — MCP servers define their own defaults
+            # for optional params.  LLMs sometimes pass None explicitly which
+            # fails Pydantic validation on the server side.
+            filtered_kwargs = {k: v for k, v in kwargs.items() if v is not None}
+            result = await session.call_tool(tool_name, filtered_kwargs)
             return "\n".join([str(c.text) if hasattr(c, 'text') else str(c) for c in result.content])
 
         def tool_func_sync(**kwargs):

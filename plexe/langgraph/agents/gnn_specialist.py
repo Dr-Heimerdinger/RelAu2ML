@@ -108,8 +108,8 @@ class RelationalGNNSpecialistAgent(BaseAgent):
         context_parts.append(f"""
 EXECUTE THESE STEPS (Training-Free HPO via MCP):
 
-1. SEARCH FOR OPTIMAL HYPERPARAMETERS using MCP tools from MULTIPLE sources:
-   
+1. SEARCH FOR OPTIMAL HYPERPARAMETERS using MCP tools:
+
    a) HEURISTICS - search_optimal_hyperparameters(
        task_type="{task_type}",
        num_nodes={dataset_chars.get('num_nodes', 10000)},
@@ -118,34 +118,22 @@ EXECUTE THESE STEPS (Training-Free HPO via MCP):
        model_architecture="gnn"
    )
    # Returns: Rule-based hyperparameters
-   
+
    b) GOOGLE SCHOLAR - search_gnn_papers_for_hyperparameters(
        task_type="{task_type}",
        model_type="Graph Neural Network",
        limit=5
    )
-   # Returns: Hyperparameters extracted from Google Scholar papers with citations
-   
-   c) KAGGLE BENCHMARKS - search_gnn_competitions_for_benchmarks(
-       task_type="{task_type}",
-       limit=3
-   )
-   # Returns: Winning solutions from Kaggle competitions
-   
-   d) KAGGLE NOTEBOOKS - search_gnn_notebooks_for_hyperparameters(
-       task_type="GNN {task_type}",
-       limit=5
-   )
-   # Returns: Top voted notebooks with proven hyperparameters
-   
-   e) ARXIV PAPERS - search_arxiv_papers(
+   # Returns: Hyperparameters extracted from Google Scholar papers
+
+   c) ARXIV PAPERS - search_arxiv_papers(
        query="Graph Neural Network {task_type} hyperparameters",
        max_results=5
    )
    # Returns: Recent preprints with methodology details
-   
-   f) ENSEMBLE VOTING - compare_hyperparameter_configs(
-       configs=[results_from_a, results_from_b, results_from_c, results_from_d],
+
+   d) ENSEMBLE VOTING - compare_hyperparameter_configs(
+       configs=[results_from_a, results_from_b, results_from_c],
        strategy="ensemble_median"
    )
    # Returns: Final recommended hyperparameters via ensemble voting
@@ -159,19 +147,13 @@ EXECUTE THESE STEPS (Training-Free HPO via MCP):
        working_dir="{working_dir}",
        csv_dir="{csv_dir}",
        task_type="{task_type}",
-       **recommended_hyperparameters  # Use result from step 1f
+       **recommended_hyperparameters  # Use result from step 1d
    )
 
-3. Report the selected hyperparameters with reasoning from all sources:
-   - Google Scholar papers (academic consensus)
-   - Kaggle competitions (proven winners)
-   - Kaggle notebooks (community best practices)
-   - arXiv preprints (cutting-edge research)
-   - Heuristic rules (dataset-specific)
+3. Report the selected hyperparameters with reasoning from sources.
 
 IMPORTANT:
 - All HPO tools are provided via MCP (Model Context Protocol)
-- You have access to 5 knowledge sources: Google Scholar, Kaggle, arXiv, Semantic Scholar, Papers With Code
 - Training execution will be handled by the Operation Agent
 - Focus on selecting optimal hyperparameters WITHOUT training experiments
 - ALWAYS use generate_training_script tool. NEVER write training scripts manually.

@@ -163,7 +163,7 @@ def analyze_task_structure(
                     pass
 
         # ================================================================
-        # Section 2: Temporal Analysis (gap-based, the key fix for A vs B)
+        # Section 2: Temporal Analysis
         # ================================================================
         entity_event_counts = df.groupby(entity_col).size()
         median_events_per_entity = float(entity_event_counts.median())

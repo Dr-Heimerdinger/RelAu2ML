@@ -1,5 +1,44 @@
-from typing import Dict, Any
+from typing import Dict, Any, Optional, Tuple
 from langchain_core.tools import tool as langchain_tool
+
+# Known RelBench dataset timestamps from the original paper.
+# Keys are substrings to match against the database name from the connection string.
+# Source: /data/kl/plexe-clone/paper/relbench/relbench/datasets/
+KNOWN_DATASET_TIMESTAMPS: Dict[str, Tuple[str, str]] = {
+    "stack": ("2020-10-01", "2021-01-01"),       # stack.py:12-13
+    "amazon": ("2015-10-01", "2016-01-01"),       # amazon.py:12-13
+    "arxiv": ("2022-01-01", "2023-01-01"),        # arxiv.py:11-12
+    "avito": ("2015-05-08", "2015-05-14"),        # avito.py:15-16
+    "event": ("2012-11-21", "2012-11-29"),        # event.py:21-22
+    "f1": ("2005-01-01", "2010-01-01"),           # f1.py:12-13
+    "hm": ("2020-09-07", "2020-09-14"),           # hm.py:16-17
+    "ratebeer": ("2018-09-01", "2020-01-01"),     # ratebeer.py:18-19
+    "salt": ("2020-02-01", "2020-07-01"),         # salt.py:13-14
+    "trial": ("2020-01-01", "2021-01-01"),        # trial.py:13-14
+}
+
+
+def _match_known_dataset(db_name: str) -> Optional[Tuple[str, str]]:
+    """Match a database name against known RelBench datasets.
+
+    Only matches when the db name has a '_full' suffix (e.g. 'stack_full'),
+    indicating the complete dataset where the author's timestamps are valid.
+    Partial datasets may not span the full date range, so we fall back to
+    percentile-based splits for those.
+
+    Returns (val_timestamp, test_timestamp) if matched, else None.
+    """
+    if not db_name:
+        return None
+    db_lower = db_name.lower()
+    # Only use hardcoded timestamps for full datasets (e.g. stack_full, amazon_full)
+    if "_full" not in db_lower:
+        return None
+    for key, timestamps in KNOWN_DATASET_TIMESTAMPS.items():
+        if db_lower.startswith(key):
+            return timestamps
+    return None
+
 
 @langchain_tool
 def get_csv_files_info(csv_dir: str) -> Dict[str, Any]:
@@ -63,13 +102,18 @@ def get_csv_files_info(csv_dir: str) -> Dict[str, Any]:
 
 
 @langchain_tool
-def get_temporal_statistics(csv_dir: str) -> Dict[str, Any]:
+def get_temporal_statistics(csv_dir: str, db_name: str = "") -> Dict[str, Any]:
     """
     Analyze temporal columns in CSV files to determine val/test timestamps.
-    
+
+    If db_name matches a known RelBench dataset, returns the author's exact
+    val/test timestamps instead of computing percentile-based splits.
+
     Args:
         csv_dir: Directory containing CSV files (relative or absolute path)
-    
+        db_name: Optional database name (e.g. "stack_full") used to match
+                 known RelBench datasets for exact author timestamps
+
     Returns:
         Dictionary with temporal analysis and suggested timestamps
     """
@@ -87,7 +131,12 @@ def get_temporal_statistics(csv_dir: str) -> Dict[str, Any]:
             "temporal_stats": {},
             "suggested_splits": {}
         }
-    
+
+    # Check for known RelBench dataset based on db_name.
+    # We don't return immediately — we still need to scan CSV files to verify
+    # the data actually extends far enough for the known timestamps + timedelta.
+    known = _match_known_dataset(db_name)
+
     temporal_stats = {}
     all_timestamps = []
     
@@ -165,33 +214,76 @@ def get_temporal_statistics(csv_dir: str) -> Dict[str, Any]:
         # Use unique timestamps sorted by date for better split calculation
         unique_timestamps = sorted(list(set(all_timestamps)))
         n = len(unique_timestamps)
-        
+
+        # If we matched a known dataset, validate that the data extends far
+        # enough for test_timestamp + timedelta (90 days).  If it does, use
+        # the author's timestamps; otherwise fall through to percentile logic.
+        if known and n > 0:
+            TIMEDELTA_HEADROOM = pd.Timedelta(days=91)
+            known_val, known_test = known
+            known_test_ts = pd.Timestamp(known_test)
+            data_max_ts = unique_timestamps[-1]
+            if known_test_ts + TIMEDELTA_HEADROOM <= data_max_ts:
+                return {
+                    "temporal_stats": temporal_stats,
+                    "suggested_splits": {
+                        "val_timestamp": known_val,
+                        "test_timestamp": known_test,
+                        "max_timestamp": str(data_max_ts),
+                        "headroom_days": str((data_max_ts - known_test_ts).days),
+                        "source": "known_relbench_dataset",
+                        "matched_db_name": db_name,
+                    }
+                }
+            # else: data too short for author timestamps, fall through
+
         if n > 2:
+            max_ts = unique_timestamps[-1]
+            min_ts = unique_timestamps[0]
+
+            # Reserve headroom after test_timestamp for the task's prediction
+            # window (timedelta).  Most RelBench tasks use 90 days; we use that
+            # as the default safety margin so that
+            #   test_timestamp + timedelta <= max_timestamp
+            # is satisfied at runtime.
+            TIMEDELTA_HEADROOM = pd.Timedelta(days=90)
+            MIN_GAP = pd.Timedelta(days=7)
+
+            # test_timestamp must leave room for at least one timedelta
+            max_test_ts = max_ts - TIMEDELTA_HEADROOM
+
             val_ts = unique_timestamps[int(n * 0.7)]
             test_ts = unique_timestamps[int(n * 0.85)]
 
-            # Enforce a minimum gap between val and test.
-            # Most prediction tasks use a timedelta of 7-30 days, so the gap
-            # between val and test must be at least that large. We use 7 days
-            # as the floor here; the task builder's validate_dataset_timestamps
-            # will catch cases where the actual timedelta is larger.
-            MIN_GAP = pd.Timedelta(days=7)
+            # Clamp test_ts so the prediction window fits
+            if test_ts > max_test_ts:
+                test_ts = max_test_ts
+
+            # Enforce a minimum gap between val and test
             time_diff = test_ts - val_ts
             if time_diff < MIN_GAP:
-                # Try to push test_ts forward
-                test_ts = val_ts + MIN_GAP
-                if test_ts > unique_timestamps[-1]:
-                    # Cannot push test forward; pull val back instead
-                    test_ts = unique_timestamps[-1]
-                    val_ts = test_ts - MIN_GAP
-                    if val_ts < unique_timestamps[0]:
-                        val_ts = unique_timestamps[0]
+                val_ts = test_ts - MIN_GAP
+                if val_ts < min_ts:
+                    val_ts = min_ts
 
-            suggested_splits = {
-                "val_timestamp": str(val_ts),
-                "test_timestamp": str(test_ts),
-                "time_diff_days": str((test_ts - val_ts).days),
-            }
+            # Final sanity: if test_ts is before val_ts, the dataset is too
+            # short for a meaningful split
+            if test_ts <= val_ts or test_ts <= min_ts:
+                suggested_splits = {
+                    "error": (
+                        f"Dataset time range too short for a 90-day prediction "
+                        f"window. Range: {min_ts} to {max_ts} "
+                        f"({(max_ts - min_ts).days} days)."
+                    )
+                }
+            else:
+                suggested_splits = {
+                    "val_timestamp": str(val_ts),
+                    "test_timestamp": str(test_ts),
+                    "max_timestamp": str(max_ts),
+                    "time_diff_days": str((test_ts - val_ts).days),
+                    "headroom_days": str((max_ts - test_ts).days),
+                }
         else:
             suggested_splits = {
                 "error": "Not enough unique timestamps to create proper splits"

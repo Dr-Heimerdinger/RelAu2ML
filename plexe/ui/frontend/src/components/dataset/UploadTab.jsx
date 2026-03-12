@@ -1,4 +1,5 @@
 import React, { useRef, useState } from 'react'
+import { FolderOpen, FileText, X, Check, AlertCircle, Upload } from 'lucide-react'
 import { uploadFiles } from '../../api/client'
 
 export default function UploadTab() {
@@ -48,14 +49,14 @@ export default function UploadTab() {
                     onClick={() => fileInputRef.current?.click()}
                     onDragOver={(e) => {
                         e.preventDefault()
-                        e.currentTarget.style.borderColor = '#2563eb'
+                        e.currentTarget.style.borderColor = 'var(--primary)'
                     }}
                     onDragLeave={(e) => {
-                        e.currentTarget.style.borderColor = '#ddd'
+                        e.currentTarget.style.borderColor = 'var(--border)'
                     }}
                     onDrop={(e) => {
                         e.preventDefault()
-                        e.currentTarget.style.borderColor = '#ddd'
+                        e.currentTarget.style.borderColor = 'var(--border)'
                         const droppedFiles = Array.from(e.dataTransfer.files)
                         setFiles((prevFiles) => [...prevFiles, ...droppedFiles])
                     }}
@@ -68,7 +69,7 @@ export default function UploadTab() {
                         style={{ display: 'none' }}
                         accept=".csv,.xlsx,.xls,.json,.parquet"
                     />
-                    <div className="upload-icon">📁</div>
+                    <div className="upload-icon"><FolderOpen size={32} /></div>
                     <p className="upload-text">Drag and drop files here or click to browse</p>
                     <p className="upload-hint">Supported formats: CSV, XLSX, JSON, Parquet</p>
                 </div>
@@ -76,13 +77,13 @@ export default function UploadTab() {
 
             {uploadError && (
                 <div className="status-message error">
-                    ✕ {uploadError}
+                    <AlertCircle size={14} /> {uploadError}
                 </div>
             )}
 
             {uploadSuccess && (
                 <div className="status-message success">
-                    ✓ Files uploaded successfully!
+                    <Check size={14} /> Files uploaded successfully!
                 </div>
             )}
 
@@ -92,13 +93,13 @@ export default function UploadTab() {
                     <ul className="file-items">
                         {files.map((file, index) => (
                             <li key={index} className="file-item">
-                                <span className="file-name">📄 {file.name}</span>
+                                <span className="file-name"><FileText size={14} /> {file.name}</span>
                                 <span className="file-size">({(file.size / 1024).toFixed(2)} KB)</span>
                                 <button
                                     className="remove-btn"
                                     onClick={() => removeFile(index)}
                                 >
-                                    ✕
+                                    <X size={14} />
                                 </button>
                             </li>
                         ))}
@@ -109,7 +110,7 @@ export default function UploadTab() {
                         onClick={handleUpload}
                         disabled={uploading}
                     >
-                        {uploading ? 'Uploading...' : 'Upload Files'}
+                        {uploading ? 'Uploading...' : <><Upload size={16} /> Upload Files</>}
                     </button>
                 </div>
             )}

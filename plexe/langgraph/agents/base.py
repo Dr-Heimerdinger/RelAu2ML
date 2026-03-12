@@ -271,15 +271,25 @@ class BaseAgent(ABC):
 
         try:
             config = {"callbacks": [self._callback_handler]} if self.emitter else {}
-            
+
             result = None
             last_valid_output = None
+            self._last_tool_results = []  # Capture tool results for retry reuse
             for chunk in agent.stream({"messages": messages}, config=config, stream_mode="updates"):
                 for node_name, node_output in chunk.items():
                     # Store valid outputs (dict with messages)
                     if isinstance(node_output, dict) and node_output.get("messages"):
                         last_valid_output = node_output
-                    
+
+                    # Capture tool results so retries can reuse them
+                    if node_name == "tools" and isinstance(node_output, dict):
+                        for msg in node_output.get("messages", []):
+                            if isinstance(msg, ToolMessage):
+                                self._last_tool_results.append({
+                                    "tool_name": msg.name,
+                                    "content": extract_text_content(msg.content)[:2000],
+                                })
+
                     if self.emitter and node_name == "agent" and isinstance(node_output, dict):
                         agent_messages = node_output.get("messages", [])
                         for msg in agent_messages:

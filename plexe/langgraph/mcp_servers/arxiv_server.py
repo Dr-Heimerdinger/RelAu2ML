@@ -13,12 +13,14 @@ BASE_URL = "http://export.arxiv.org/api/query"
 def search_arxiv_papers(
     query: str,
     max_results: int = 10,
-    sort_by: str = "relevance",
-    sort_order: str = "descending"
+    sort_by: Optional[str] = None,
+    sort_order: Optional[str] = None
 ) -> List[Dict[str, Any]]:
     """
     Search arXiv for papers.
     """
+    sort_by = sort_by or "relevance"
+    sort_order = sort_order or "descending"
     params = {
         'search_query': query,
         'start': 0,

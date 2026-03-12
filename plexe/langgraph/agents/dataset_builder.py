@@ -15,7 +15,6 @@ from langchain_core.messages import HumanMessage
 from plexe.langgraph.agents.base import BaseAgent
 from plexe.langgraph.config import AgentConfig
 from plexe.langgraph.state import PipelineState, PipelinePhase
-from plexe.langgraph.tools.common import save_artifact
 from plexe.langgraph.tools.dataset_builder import (
     get_csv_files_info,
     get_temporal_statistics,
@@ -28,7 +27,7 @@ logger = logging.getLogger(__name__)
 
 class DatasetBuilderAgent(BaseAgent):
     """Agent for building RelBench Dataset classes from CSV data."""
-    
+
     def __init__(
         self,
         config: Optional[AgentConfig] = None,
@@ -38,7 +37,6 @@ class DatasetBuilderAgent(BaseAgent):
             get_csv_files_info,
             get_temporal_statistics,
             register_dataset_code,
-            save_artifact,
         ]
         
         if additional_tools:
@@ -83,9 +81,17 @@ class DatasetBuilderAgent(BaseAgent):
                 return result
             
             if attempt < max_retries:
-                # Add a follow-up message to force completion
-                retry_message = self._build_retry_message(working_dir, state.get("csv_dir", ""))
-                
+                # Collect tool results from the failed attempt so the retry
+                # does not have to re-call expensive tools (e.g. get_csv_files_info,
+                # get_temporal_statistics on large datasets).
+                tool_context = ""
+                if hasattr(self, '_last_tool_results') and self._last_tool_results:
+                    tool_context = "\n\nPREVIOUS TOOL RESULTS (do NOT re-call these tools):\n"
+                    for tr in self._last_tool_results:
+                        tool_context += f"\n--- {tr['tool_name']} ---\n{tr['content']}\n"
+
+                retry_message = self._build_retry_message(working_dir, tool_context)
+
                 # Update messages in state for retry
                 messages = state.get("messages", [])
                 messages.append({
@@ -93,11 +99,11 @@ class DatasetBuilderAgent(BaseAgent):
                     "content": retry_message,
                 })
                 state = {**state, "messages": messages}
-        
+
         # All retries exhausted, return the last result (which has error)
         return result
-    
-    def _build_retry_message(self, working_dir: str, csv_dir: str) -> str:
+
+    def _build_retry_message(self, working_dir: str, tool_context: str = "") -> str:
         """Build a retry message to force agent to complete the task."""
         return f"""
 CRITICAL: YOU DID NOT COMPLETE YOUR TASK!
@@ -105,29 +111,51 @@ CRITICAL: YOU DID NOT COMPLETE YOUR TASK!
 The file {working_dir}/dataset.py does NOT exist.
 You MUST call register_dataset_code() to create this file.
 
+DO NOT call get_csv_files_info or get_temporal_statistics again — their results are below.
 DO NOT analyze again. DO NOT explain. Just execute these steps NOW:
 
-1. Generate the complete GenDataset class code
+1. Generate the complete GenDataset class code using the tool results below
 2. Call register_dataset_code(code, "GenDataset", "{working_dir}/dataset.py")
 
 Your response MUST include a tool call to register_dataset_code.
 If you do not call this tool, you have FAILED completely.
 
 EXECUTE THE TOOL CALL NOW.
+{tool_context}
 """
     
+    @staticmethod
+    def _extract_db_name(connection_string: str) -> str:
+        """Extract the database name from a connection string.
+
+        E.g. 'postgresql+psycopg2://user:pass@host:5432/stack_full' → 'stack_full'
+        """
+        if not connection_string:
+            return ""
+        try:
+            # Handle SQLAlchemy-style connection strings
+            parts = connection_string.rsplit("/", 1)
+            if len(parts) == 2:
+                # Remove query params if any
+                db_name = parts[1].split("?")[0]
+                return db_name
+        except Exception:
+            pass
+        return ""
+
     def _build_context(self, state: PipelineState) -> str:
         """Build context with CSV, schema, and EDA information."""
         context_parts = []
-        
+
         working_dir = state.get('working_dir', '')
         csv_dir = state.get('csv_dir', '')
-        
+        db_name = self._extract_db_name(state.get('db_connection_string', ''))
+
         # Convert to absolute paths for the agent
         if working_dir:
             working_dir = os.path.abspath(working_dir)
             context_parts.append(f"Working directory: {working_dir}")
-        
+
         if csv_dir:
             csv_dir = os.path.abspath(csv_dir)
             context_parts.append(f"CSV directory: {csv_dir}")
@@ -182,57 +210,38 @@ EXECUTE THE TOOL CALL NOW.
                         context_parts.append(f"  - {key}: {info['cardinality']}")
         
         task_instruction = f"""
-YOUR COMPLETE TASK - ALL 5 STEPS ARE MANDATORY 
+YOU MUST COMPLETE ALL 4 STEPS IN A SINGLE RESPONSE. You will NOT get a second chance.
+If you stop before calling register_dataset_code(), the pipeline FAILS PERMANENTLY.
 
-STEP 1: Information Gathering
-Tool: get_csv_files_info("{csv_dir}")
-Purpose: Understand table structure, column names, and row counts for all CSV files
+STEP 1: Call get_csv_files_info("{csv_dir}")
+  → Returns table names, columns, row counts
 
-STEP 2: Temporal Analysis
-Tool: get_temporal_statistics("{csv_dir}")
-Purpose: Determine val_timestamp and test_timestamp for train/validation/test splits
+STEP 2: Call get_temporal_statistics("{csv_dir}", db_name="{db_name}")
+  → Returns suggested val_timestamp and test_timestamp
+  (If this is a known RelBench dataset, exact author timestamps are returned)
 
-STEP 3: Design Analysis (write your analysis explicitly)
-You must analyze and document:
-- Which tables are temporal (have time_col) vs static (time_col=None)
-- Foreign key relationships between tables (which columns reference which tables)
-- The exact val_timestamp and test_timestamp values you will use
-- Any data cleaning requirements (\\N missing values, timezone handling, type conversions)
-- Which tables are dimension tables vs fact tables
-Action: Write out your complete analysis before proceeding to Step 4
+STEP 3: Generate complete GenDataset class code
+  Silently analyze the tool results from Steps 1-2 (do NOT write out a separate analysis).
+  Then immediately generate a complete GenDataset class with:
+  - Class definition extending Dataset
+  - val_timestamp = pd.Timestamp("YYYY-MM-DD") using value from Step 2
+  - test_timestamp = pd.Timestamp("YYYY-MM-DD") using value from Step 2
+  - __init__ method accepting csv_dir and cache_dir parameters
+  - make_db() method that:
+    * Loads all CSV files
+    * Handles data cleaning (\\N → NaN, timezone stripping, type conversions)
+    * Creates Table objects with correct fkey_col_to_pkey_table mappings
+    * Sets time_col for temporal tables (or None for static tables)
+    * Returns Database with all tables
 
-STEP 4: Code Generation
-Generate a complete GenDataset class that includes:
-- Class definition extending Dataset
-- val_timestamp = pd.Timestamp("YYYY-MM-DD") using value from Step 2
-- test_timestamp = pd.Timestamp("YYYY-MM-DD") using value from Step 2
-- __init__ method that accepts csv_dir and cache_dir parameters
-- make_db() method that:
-  * Loads all CSV files from Step 1
-  * Applies data cleaning from Step 3
-  * Creates Table objects with correct fkey_col_to_pkey_table mappings
-  * Sets appropriate time_col for each table (or None for static tables)
-  * Returns Database with all tables
-Action: Generate the complete, working Python code now
+STEP 4: Call register_dataset_code(code, "GenDataset", "{working_dir}/dataset.py")
+  → MUST return {{"status": "registered", ...}}
 
-STEP 5: Code Registration (CRITICAL - DO NOT SKIP)
-Tool: register_dataset_code(code, "GenDataset", "{working_dir}/dataset.py")
-Purpose: Save the generated Python code to the file system
-Action: Call this tool with your complete code from Step 4
-Result: Must return {{"status": "registered", ...}}
-
-CRITICAL REQUIREMENTS:
-- DO NOT STOP after Steps 1-2. You MUST complete ALL 5 STEPS.
-- DO NOT say "I will generate the code" or "Next I'll call the tool" - EXECUTE the actions immediately.
+RULES:
+- Execute ALL tool calls. Do NOT describe what you will do — just DO it.
+- Do NOT write a separate analysis section. Go directly from tool results to code generation.
 - The file {working_dir}/dataset.py MUST exist when you finish.
-- Your task is INCOMPLETE without calling register_dataset_code() in Step 5.
-
-SUCCESS CONDITION:
-The register_dataset_code() tool was called and returned success status.
-The file {working_dir}/dataset.py exists and contains valid Python code.
-
-FAILURE CONDITION:
-You stopped before calling register_dataset_code() OR the file was not created.
+- Your task is INCOMPLETE and FAILED unless register_dataset_code() was called successfully.
 """
         context_parts.append(task_instruction)
         
@@ -279,6 +288,16 @@ You stopped before calling register_dataset_code() OR the file was not created.
 
             base_result["dataset_info"] = dataset_info
             base_result["current_phase"] = PipelinePhase.TASK_BUILDING.value
+
+            # Cache CSV files info in state so downstream agents (TaskBuilder)
+            # don't have to re-call get_csv_files_info on large datasets.
+            csv_dir = state.get("csv_dir", "")
+            if csv_dir:
+                try:
+                    csv_info = get_csv_files_info.invoke({"csv_dir": csv_dir})
+                    base_result["csv_files_info"] = csv_info
+                except Exception:
+                    pass  # non-critical; TaskBuilder can still call the tool
         else:
             error_msg = f"CRITICAL ERROR: Dataset file not found at {dataset_path}. DatasetBuilderAgent did not complete its task. The agent must call register_dataset_code() to generate dataset.py."
             logger.error(error_msg)

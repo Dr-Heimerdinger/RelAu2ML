@@ -1,4 +1,5 @@
 import React, { useState, useEffect, useRef } from 'react'
+import { Check, AlertTriangle, X } from 'lucide-react'
 import { getModelSchema, runInference, validateDatabase } from '../api/client'
 
 function formatMetric(value) {
@@ -185,7 +186,7 @@ function DatabaseValidator({ modelId, requiredTables }) {
                         {Object.entries(result.tables).map(([name, info]) => (
                             <div key={name} className={`db-val-table-row ${info.compatible ? 'ok' : 'fail'}`}>
                                 <span className="db-val-table-icon">
-                                    {info.compatible ? '✓' : info.found ? '⚠' : '✗'}
+                                    {info.compatible ? <Check size={14} /> : info.found ? <AlertTriangle size={14} /> : <X size={14} />}
                                 </span>
                                 <span className="db-val-table-name">{name}</span>
                                 {!info.found && <span className="db-val-note">Table not found</span>}

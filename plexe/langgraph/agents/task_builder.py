@@ -15,7 +15,6 @@ from langchain_core.messages import HumanMessage
 from plexe.langgraph.agents.base import BaseAgent
 from plexe.langgraph.config import AgentConfig
 from plexe.langgraph.state import PipelineState, PipelinePhase
-from plexe.langgraph.tools.common import save_artifact
 from plexe.langgraph.tools.dataset_builder import get_csv_files_info
 from plexe.langgraph.tools.task_builder import test_sql_query, register_task_code, validate_dataset_timestamps, fix_dataset_timestamps, analyze_task_structure, determine_lookback_window
 from plexe.langgraph.prompts.task_builder import TASK_BUILDER_SYSTEM_PROMPT
@@ -25,7 +24,7 @@ logger = logging.getLogger(__name__)
 
 class TaskBuilderAgent(BaseAgent):
     """Agent for building RelBench Task classes."""
-    
+
     def __init__(
         self,
         config: Optional[AgentConfig] = None,
@@ -39,7 +38,6 @@ class TaskBuilderAgent(BaseAgent):
             fix_dataset_timestamps,
             test_sql_query,
             register_task_code,
-            save_artifact,
         ]
         
         if additional_tools:
@@ -84,9 +82,15 @@ class TaskBuilderAgent(BaseAgent):
                 return result
             
             if attempt < max_retries:
-                # Add a follow-up message to force completion
-                retry_message = self._build_retry_message(working_dir, state.get("csv_dir", ""))
-                
+                # Collect tool results from the failed attempt for retry reuse
+                tool_context = ""
+                if hasattr(self, '_last_tool_results') and self._last_tool_results:
+                    tool_context = "\n\nPREVIOUS TOOL RESULTS (do NOT re-call these tools):\n"
+                    for tr in self._last_tool_results:
+                        tool_context += f"\n--- {tr['tool_name']} ---\n{tr['content']}\n"
+
+                retry_message = self._build_retry_message(working_dir, tool_context)
+
                 # Update messages in state for retry
                 messages = state.get("messages", [])
                 messages.append({
@@ -94,11 +98,11 @@ class TaskBuilderAgent(BaseAgent):
                     "content": retry_message,
                 })
                 state = {**state, "messages": messages}
-        
+
         # All retries exhausted, return the last result (which has error)
         return result
-    
-    def _build_retry_message(self, working_dir: str, csv_dir: str) -> str:
+
+    def _build_retry_message(self, working_dir: str, tool_context: str = "") -> str:
         """Build a retry message to force agent to complete the task."""
         return f"""
 CRITICAL: YOU DID NOT COMPLETE YOUR TASK!
@@ -106,6 +110,7 @@ CRITICAL: YOU DID NOT COMPLETE YOUR TASK!
 The file {working_dir}/task.py does NOT exist.
 You MUST call register_task_code() to create this file.
 
+DO NOT re-call tools you already used — their results are below.
 DO NOT analyze again. DO NOT explain. Just execute these steps NOW:
 
 1. Generate the complete GenTask class code with SQL query
@@ -115,6 +120,7 @@ Your response MUST include a tool call to register_task_code.
 If you do not call this tool, you have FAILED completely.
 
 EXECUTE THE TOOL CALL NOW.
+{tool_context}
 """
     
     def _build_context(self, state: PipelineState) -> str:
@@ -129,7 +135,21 @@ EXECUTE THE TOOL CALL NOW.
         
         if csv_dir:
             context_parts.append(f"CSV directory: {csv_dir}")
-        
+
+        # Inject cached CSV files info so the agent doesn't re-call get_csv_files_info
+        if state.get("csv_files_info"):
+            csv_info = state["csv_files_info"]
+            context_parts.append("\n## CSV Files Info (pre-cached from DatasetBuilder):")
+            for f in csv_info.get("files", []):
+                context_parts.append(
+                    f"  - {f.get('name')}: {f.get('row_count', '?')} rows, "
+                    f"columns: {f.get('columns', [])}"
+                )
+            context_parts.append(
+                "NOTE: CSV info is already available above. "
+                "Only call get_csv_files_info if you need to re-verify column names."
+            )
+
         # Pre-check: Verify dataset.py exists
         dataset_path = os.path.join(working_dir, "dataset.py") if working_dir else ""
         if dataset_path and not os.path.exists(dataset_path):

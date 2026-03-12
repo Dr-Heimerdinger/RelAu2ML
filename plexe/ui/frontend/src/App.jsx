@@ -8,6 +8,22 @@ export default function App() {
     const [wsUrl, setWsUrl] = useState(null)
     const [activePage, setActivePage] = useState('chat')
 
+    // Theme state with localStorage + system preference
+    const [theme, setTheme] = useState(() => {
+        const saved = localStorage.getItem('plexe-theme')
+        if (saved) return saved
+        return window.matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light'
+    })
+
+    useEffect(() => {
+        document.documentElement.setAttribute('data-theme', theme)
+        localStorage.setItem('plexe-theme', theme)
+    }, [theme])
+
+    const toggleTheme = useCallback(() => {
+        setTheme(t => t === 'dark' ? 'light' : 'dark')
+    }, [])
+
     // Lift WebSocket state to App level to persist across tab switches
     const [messages, setMessages] = useState([])
     const [status, setStatus] = useState('disconnected')
@@ -28,7 +44,7 @@ export default function App() {
         // If backend is same origin, use /ws; otherwise use full URL
         let wsUrlFinal = `${proto}//${window.location.host}/ws`
         if (backendUrl !== window.location.origin) {
-            // Backend is on a different host/port  
+            // Backend is on a different host/port
             const backendHost = new URL(backendUrl).host
             wsUrlFinal = `${proto}//${backendHost}/ws`
         }
@@ -162,7 +178,7 @@ export default function App() {
         // Add a message showing the user's decision
         setMessages((m) => [...m, {
             role: 'user',
-            content: confirmed ? '✓ Confirmed' : '✗ Rejected'
+            content: confirmed ? 'Confirmed' : 'Rejected'
         }])
 
         // Clear the confirmation request
@@ -185,7 +201,7 @@ export default function App() {
 
     return (
         <div className="app-root">
-            <Sidebar activePage={activePage} setActivePage={setActivePage} />
+            <Sidebar activePage={activePage} setActivePage={setActivePage} theme={theme} onToggleTheme={toggleTheme} />
             <main className="app-main">
                 {/* Use CSS to show/hide instead of conditional rendering to preserve state */}
                 <div style={{ display: activePage === 'chat' ? 'flex' : 'none', flexDirection: 'column', height: '100%' }}>

@@ -13,7 +13,6 @@ from langchain_core.tools import BaseTool
 from plexe.langgraph.agents.base import BaseAgent
 from plexe.langgraph.config import AgentConfig
 from plexe.langgraph.state import PipelineState, PipelinePhase
-from plexe.langgraph.tools.common import save_artifact
 from plexe.langgraph.tools.gnn_specialist import execute_training_script
 from plexe.langgraph.prompts.operation import OPERATION_SYSTEM_PROMPT
 
@@ -30,7 +29,6 @@ class OperationAgent(BaseAgent):
     ):
         tools = [
             execute_training_script,
-            save_artifact,
         ]
         
         if additional_tools:

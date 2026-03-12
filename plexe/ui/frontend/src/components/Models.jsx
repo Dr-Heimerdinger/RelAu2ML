@@ -19,18 +19,13 @@ function TaskTypeBadge({ type }) {
         multiclass_classification: 'Multiclass',
         regression: 'Regression',
     }
-    const colors = {
-        binary_classification: { bg: '#dbeafe', color: '#1e40af', border: '#93c5fd' },
-        multiclass_classification: { bg: '#fae8ff', color: '#86198f', border: '#e879f9' },
-        regression: { bg: '#dcfce7', color: '#166534', border: '#86efac' },
+    const classMap = {
+        binary_classification: 'task-badge-binary',
+        multiclass_classification: 'task-badge-multiclass',
+        regression: 'task-badge-regression',
     }
-    const style = colors[type] || { bg: '#f3f4f6', color: '#374151', border: '#d1d5db' }
     return (
-        <span className="task-type-badge" style={{
-            background: style.bg,
-            color: style.color,
-            border: `1px solid ${style.border}`,
-        }}>
+        <span className={`task-type-badge ${classMap[type] || ''}`}>
             {labels[type] || type || 'Unknown'}
         </span>
     )

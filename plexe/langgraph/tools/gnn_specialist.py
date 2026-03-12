@@ -582,6 +582,22 @@ def execute_training_script(
             })
             return
 
+    # --- Output truncation to avoid TPM limits ---
+    # Large datasets produce 10,000+ stdout/stderr lines (tqdm bars, epoch logs).
+    # Returning all of them as a tool result can exceed the LLM's token-per-minute
+    # limit (e.g. 400K TPM for gpt-4.1-mini).  We keep the first few lines
+    # (setup info, sample counts) and the last few (final metrics, errors).
+    MAX_STDOUT_LINES = 50
+    MAX_STDERR_LINES = 30
+
+    def _truncate_lines(lines, max_lines, label="output"):
+        if len(lines) <= max_lines:
+            return lines
+        head = lines[:10]
+        tail = lines[-max_lines:]
+        omitted = len(lines) - 10 - max_lines
+        return head + [f"\n... ({omitted} {label} lines omitted) ...\n"] + tail
+
     # Throttle state for tqdm updates (avoid flooding WebSocket)
     _last_stderr_emit = [0.0]  # mutable list for closure access
 
@@ -676,8 +692,10 @@ def execute_training_script(
             return {
                 "status": "timeout",
                 "error": f"Script execution exceeded {timeout} seconds",
-                "stdout": "\n".join(stdout_lines),
-                "stderr": "\n".join(stderr_lines),
+                "stdout": "\n".join(_truncate_lines(stdout_lines, MAX_STDOUT_LINES, "stdout")),
+                "stderr": "\n".join(_truncate_lines(stderr_lines, MAX_STDERR_LINES, "stderr")),
+                "total_stdout_lines": len(stdout_lines),
+                "total_stderr_lines": len(stderr_lines),
             }
 
         stdout_thread.join(timeout=10)
@@ -691,10 +709,12 @@ def execute_training_script(
 
         return {
             "status": "success" if process.returncode == 0 else "failed",
-            "stdout": "\n".join(stdout_lines),
-            "stderr": "\n".join(stderr_lines),
+            "stdout": "\n".join(_truncate_lines(stdout_lines, MAX_STDOUT_LINES, "stdout")),
+            "stderr": "\n".join(_truncate_lines(stderr_lines, MAX_STDERR_LINES, "stderr")),
             "return_code": process.returncode,
             "training_results": training_results,
+            "total_stdout_lines": len(stdout_lines),
+            "total_stderr_lines": len(stderr_lines),
         }
     except Exception as e:
         return {

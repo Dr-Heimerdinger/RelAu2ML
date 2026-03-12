@@ -1,15 +1,12 @@
 import React from 'react'
+import { MessageSquare, Database, Box, Sun, Moon, Layers } from 'lucide-react'
 
-export default function Sidebar({ activePage, setActivePage }) {
+export default function Sidebar({ activePage, setActivePage, theme, onToggleTheme }) {
     return (
         <aside className="sidebar">
             <div className="sidebar-header">
                 <div className="sidebar-logo">
-                    <svg width="28" height="28" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.75">
-                        <path d="M12 2L2 7l10 5 10-5-10-5z" />
-                        <path d="M2 17l10 5 10-5" />
-                        <path d="M2 12l10 5 10-5" />
-                    </svg>
+                    <Layers size={28} strokeWidth={1.75} />
                     <h2>Plexe</h2>
                 </div>
                 <p>AI Model Builder</p>
@@ -21,9 +18,7 @@ export default function Sidebar({ activePage, setActivePage }) {
                     onClick={() => setActivePage('chat')}
                 >
                     <span className="icon">
-                        <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
-                            <path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z" />
-                        </svg>
+                        <MessageSquare size={20} />
                     </span>
                     <span className="label">Chat</span>
                 </button>
@@ -33,11 +28,7 @@ export default function Sidebar({ activePage, setActivePage }) {
                     onClick={() => setActivePage('dataset')}
                 >
                     <span className="icon">
-                        <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
-                            <ellipse cx="12" cy="5" rx="9" ry="3" />
-                            <path d="M21 12c0 1.66-4 3-9 3s-9-1.34-9-3" />
-                            <path d="M3 5v14c0 1.66 4 3 9 3s9-1.34 9-3V5" />
-                        </svg>
+                        <Database size={20} />
                     </span>
                     <span className="label">Dataset</span>
                 </button>
@@ -47,15 +38,22 @@ export default function Sidebar({ activePage, setActivePage }) {
                     onClick={() => setActivePage('models')}
                 >
                     <span className="icon">
-                        <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
-                            <path d="M21 16V8a2 2 0 0 0-1-1.73l-7-4a2 2 0 0 0-2 0l-7 4A2 2 0 0 0 3 8v8a2 2 0 0 0 1 1.73l7 4a2 2 0 0 0 2 0l7-4A2 2 0 0 0 21 16z" />
-                            <polyline points="3.27 6.96 12 12.01 20.73 6.96" />
-                            <line x1="12" y1="22.08" x2="12" y2="12" />
-                        </svg>
+                        <Box size={20} />
                     </span>
                     <span className="label">Models</span>
                 </button>
             </nav>
+
+            <div className="sidebar-footer">
+                <button
+                    className="theme-toggle"
+                    onClick={onToggleTheme}
+                    title={theme === 'dark' ? 'Switch to light mode' : 'Switch to dark mode'}
+                >
+                    {theme === 'dark' ? <Sun size={18} /> : <Moon size={18} />}
+                    <span>{theme === 'dark' ? 'Light Mode' : 'Dark Mode'}</span>
+                </button>
+            </div>
         </aside>
     )
 }

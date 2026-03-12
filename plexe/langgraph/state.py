@@ -120,6 +120,7 @@ class PipelineState(TypedDict, total=False):
     
     schema_info: Optional[SchemaInfo]
     eda_info: Optional[EDAInfo]
+    csv_files_info: Optional[Dict[str, Any]]
     dataset_info: Optional[DatasetInfo]
     task_info: Optional[TaskInfo]
     training_result: Optional[TrainingResult]
@@ -176,6 +177,7 @@ def create_initial_state(
         csv_dir=None,
         schema_info=None,
         eda_info=None,
+        csv_files_info=None,
         dataset_info=None,
         task_info=None,
         training_result=None,
