@@ -161,11 +161,11 @@ class OperationAgent:
             self.emitter.emit_tool_call(
                 self.name,
                 "execute_training_script",
-                {"script_path": script_path, "timeout": 3600},
+                {"script_path": script_path, "timeout": 14400},
             )
 
         result = execute_training_script.invoke(
-            {"script_path": script_path, "timeout": 3600}
+            {"script_path": script_path, "timeout": 14400}
         )
 
         status = result.get("status", "error")

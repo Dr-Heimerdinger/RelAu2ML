@@ -415,7 +415,7 @@ print(f"\\nTraining complete! Results saved to {working_dir}/training_results.js
 @langchain_tool
 def execute_training_script(
     script_path: str,
-    timeout: int = 3600
+    timeout: int = 14400
 ) -> Dict[str, Any]:
     """
     Execute a training script with real-time progress streaming.
