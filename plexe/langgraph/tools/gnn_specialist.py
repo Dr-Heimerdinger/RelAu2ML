@@ -480,10 +480,14 @@ def execute_training_script(
     total_epochs = None
     stdout_lines = []
     stderr_lines = []
+    _training_start_time = [None]  # mutable for closure access
 
     def _emit_progress(progress_data):
         if emitter:
             progress_data["epoch_history"] = epoch_history
+            progress_data["timeout_seconds"] = timeout
+            if _training_start_time[0] is not None:
+                progress_data["elapsed_seconds"] = round(time.time() - _training_start_time[0], 1)
             if best_metric_name:
                 progress_data["best_metric_name"] = best_metric_name
             if best_metric_value is not None:
@@ -677,6 +681,7 @@ def execute_training_script(
         )
 
         # Emit initial progress
+        _training_start_time[0] = time.time()
         _emit_progress({
             "phase": "preparing",
             "message": "Starting training script...",

@@ -826,6 +826,54 @@ body,
   border-radius: 20px;
 }
 
+/* Training timeout / elapsed timer bar */
+.training-timeout-bar-container {
+  margin-bottom: 0.75rem;
+}
+
+.training-timeout-labels {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: 0.3rem;
+}
+
+.training-timeout-elapsed {
+  font-size: 0.85rem;
+  font-weight: 700;
+  font-variant-numeric: tabular-nums;
+  color: var(--text);
+}
+
+.training-timeout-max {
+  font-size: 0.75rem;
+  font-weight: 500;
+  color: var(--text-secondary, #6b7280);
+}
+
+.training-timeout-bar {
+  height: 6px;
+  background: rgba(107, 114, 128, 0.12);
+  border-radius: 3px;
+  overflow: hidden;
+}
+
+.training-timeout-fill {
+  height: 100%;
+  background: linear-gradient(90deg, #6366f1, #818cf8);
+  border-radius: 3px;
+  transition: width 1s linear;
+}
+
+.training-timeout-fill.warning {
+  background: linear-gradient(90deg, #f59e0b, #ef4444);
+}
+
+.training-timeout-fill.completed {
+  background: linear-gradient(90deg, #10b981, #34d399);
+  transition: width 0.3s ease;
+}
+
 /* Epoch progress bar */
 .training-progress-bar-container {
   display: flex;

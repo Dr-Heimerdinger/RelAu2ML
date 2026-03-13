@@ -145,6 +145,8 @@ const PipelineProgress = ({ messages, cumulativeTokens }) => {
 // ===================== Training Progress Component =====================
 
 const TrainingProgress = ({ steps }) => {
+    const [now, setNow] = useState(Date.now())
+
     const progressState = useMemo(() => {
         let phase = 'preparing'
         let currentEpoch = 0
@@ -159,6 +161,8 @@ const TrainingProgress = ({ steps }) => {
         let epochHistory = []
         let lastMessage = ''
         let isCompleted = false
+        let timeoutSeconds = null
+        let elapsedSeconds = null
 
         const seenEpochs = new Set()
 
@@ -175,6 +179,8 @@ const TrainingProgress = ({ steps }) => {
             if (p.batch_progress !== undefined) batchProgress = p.batch_progress
             if (p.current_batch) currentBatch = p.current_batch
             if (p.total_batches) totalBatches = p.total_batches
+            if (p.timeout_seconds) timeoutSeconds = p.timeout_seconds
+            if (p.elapsed_seconds !== undefined && p.elapsed_seconds !== null) elapsedSeconds = p.elapsed_seconds
 
             if (p.current_epoch && p.loss !== undefined && p.loss !== null && p.phase === 'training') {
                 currentEpoch = p.current_epoch
@@ -212,15 +218,56 @@ const TrainingProgress = ({ steps }) => {
         return {
             phase, currentEpoch, totalEpochs, currentLoss, batchProgress,
             currentBatch, totalBatches, bestMetricName, bestMetricValue,
-            latestMetrics, epochHistory, lastMessage, isCompleted
+            latestMetrics, epochHistory, lastMessage, isCompleted,
+            timeoutSeconds, elapsedSeconds,
         }
     }, [steps])
 
     const {
         phase, currentEpoch, totalEpochs, currentLoss, batchProgress,
         currentBatch, totalBatches, bestMetricName, bestMetricValue,
-        latestMetrics, epochHistory, lastMessage, isCompleted
+        latestMetrics, epochHistory, lastMessage, isCompleted,
+        timeoutSeconds, elapsedSeconds,
     } = progressState
+
+    // Live-ticking elapsed timer: uses the last known elapsed_seconds from
+    // backend as a baseline and increments locally every second until the
+    // next backend update arrives or training completes.
+    const lastElapsedRef = useRef(null)
+    const baseTimestampRef = useRef(null)
+
+    useEffect(() => {
+        if (elapsedSeconds !== null && elapsedSeconds !== lastElapsedRef.current) {
+            lastElapsedRef.current = elapsedSeconds
+            baseTimestampRef.current = Date.now()
+        }
+    }, [elapsedSeconds])
+
+    useEffect(() => {
+        if (isCompleted || timeoutSeconds === null) return
+        const timer = setInterval(() => setNow(Date.now()), 1000)
+        return () => clearInterval(timer)
+    }, [isCompleted, timeoutSeconds])
+
+    const liveElapsed = useMemo(() => {
+        if (lastElapsedRef.current === null || baseTimestampRef.current === null) return null
+        if (isCompleted) return lastElapsedRef.current
+        const drift = (now - baseTimestampRef.current) / 1000
+        return Math.min(lastElapsedRef.current + drift, timeoutSeconds || Infinity)
+    }, [now, isCompleted, timeoutSeconds])
+
+    const formatDuration = (seconds) => {
+        if (seconds === null || seconds === undefined) return '--:--:--'
+        const s = Math.floor(seconds)
+        const h = Math.floor(s / 3600)
+        const m = Math.floor((s % 3600) / 60)
+        const sec = s % 60
+        return `${h}:${String(m).padStart(2, '0')}:${String(sec).padStart(2, '0')}`
+    }
+
+    const timeoutPercent = (timeoutSeconds && liveElapsed !== null)
+        ? Math.min(Math.round((liveElapsed / timeoutSeconds) * 100), 100)
+        : 0
 
     const epochPercent = totalEpochs > 0 ? Math.round((currentEpoch / totalEpochs) * 100) : 0
 
@@ -317,6 +364,25 @@ const TrainingProgress = ({ steps }) => {
                     </span>
                 )}
             </div>
+
+            {timeoutSeconds && (
+                <div className="training-timeout-bar-container">
+                    <div className="training-timeout-labels">
+                        <span className="training-timeout-elapsed">
+                            {formatDuration(liveElapsed)}
+                        </span>
+                        <span className="training-timeout-max">
+                            Max {formatDuration(timeoutSeconds)}
+                        </span>
+                    </div>
+                    <div className="training-timeout-bar">
+                        <div
+                            className={`training-timeout-fill ${timeoutPercent >= 90 ? 'warning' : ''} ${isCompleted ? 'completed' : ''}`}
+                            style={{ width: `${timeoutPercent}%` }}
+                        />
+                    </div>
+                </div>
+            )}
 
             {totalEpochs > 0 && (
                 <div className="training-progress-bar-container">
