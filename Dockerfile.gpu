@@ -1,4 +1,4 @@
-FROM pytorch/pytorch:2.7.0-cuda12.8-cudnn9-runtime
+FROM pytorch/pytorch:2.10.0-cuda12.8-cudnn9-runtime
 ENV DEBIAN_FRONTEND=noninteractive
 WORKDIR /app
  
@@ -37,7 +37,7 @@ COPY pyproject.toml README.md ./
  
 # ----------------------------
 # BƯỚC 2: Install main + extras từ pyproject.toml
-# torch 2.7.0+cu128 trong base image thỏa mãn >=2.3.0,<3 — uv giữ nguyên
+# torch 2.10.0+cu128 trong base image thỏa mãn >=2.3.0,<3 — uv giữ nguyên
 # Tạo stub trước để Docker layer cache hoạt động khi chỉ pyproject.toml thay đổi
 # ----------------------------
 RUN mkdir -p plexe && touch plexe/__init__.py
@@ -53,7 +53,7 @@ RUN uv pip install torchvision torchaudio
 # Theo hướng dẫn chính thức: https://pytorch-geometric.readthedocs.io
 # ----------------------------
 RUN pip install pyg_lib torch_scatter torch_sparse torch_cluster torch_spline_conv \
-    -f https://data.pyg.org/whl/torch-2.7.0+cu128.html
+    -f https://data.pyg.org/whl/torch-2.10.0+cu128.html
  
 # ----------------------------
 # BƯỚC 5: Extra packages không có trong pyproject.toml

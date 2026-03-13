@@ -31,7 +31,9 @@ def main():
     parser.add_argument("--splits", type=str, default="val,test",
                         help="Comma-separated splits to download (default: val,test)")
     parser.add_argument("--force", action="store_true",
-                        help="Re-download even if parquet already exists")
+                        help="Re-download even if parquet/csv already exists")
+    parser.add_argument("--no-csv", action="store_true",
+                        help="Skip saving CSV files (only save parquet)")
     args = parser.parse_args()
 
     splits = [s.strip() for s in args.splits.split(",")]
@@ -61,7 +63,13 @@ def main():
         for split in splits:
             out_path = os.path.join(args.output_dir, ds_name, task_name, f"{split}.parquet")
 
-            if os.path.exists(out_path) and not args.force:
+            csv_path = os.path.splitext(out_path)[0] + ".csv"
+
+            parquet_exists = os.path.exists(out_path)
+            csv_exists = os.path.exists(csv_path)
+            both_exist = parquet_exists and (args.no_csv or csv_exists)
+
+            if both_exist and not args.force:
                 print(f"  [{split}] Already exists, skipping (use --force to overwrite)")
                 skip_count += 1
                 continue
@@ -79,8 +87,15 @@ def main():
                 table = task.get_table(split, mask_input_cols=False)
 
                 os.makedirs(os.path.dirname(out_path), exist_ok=True)
-                table.save(out_path)
-                print(f"  [{split}] Saved to {out_path} ({len(table)} rows)")
+
+                if not parquet_exists or args.force:
+                    table.save(out_path)
+                    print(f"  [{split}] Saved parquet to {out_path} ({len(table)} rows)")
+
+                if not args.no_csv and (not csv_exists or args.force):
+                    table.df.to_csv(csv_path, index=False)
+                    print(f"  [{split}] Saved CSV to {csv_path} ({len(table.df)} rows)")
+
                 success_count += 1
 
             except Exception as e:
