@@ -2719,9 +2719,14 @@ dependencies = [
 all = [
     { name = "accelerate" },
     { name = "fastapi" },
+    { name = "pyg-lib" },
     { name = "safetensors" },
     { name = "sentence-transformers" },
     { name = "tokenizers" },
+    { name = "torch-cluster" },
+    { name = "torch-scatter" },
+    { name = "torch-sparse" },
+    { name = "torch-spline-conv" },
     { name = "transformers" },
     { name = "uvicorn", extra = ["standard"] },
     { name = "websockets" },
@@ -2730,6 +2735,13 @@ chatui = [
     { name = "fastapi" },
     { name = "uvicorn", extra = ["standard"] },
     { name = "websockets" },
+]
+pyg-extensions = [
+    { name = "pyg-lib" },
+    { name = "torch-cluster" },
+    { name = "torch-scatter" },
+    { name = "torch-sparse" },
+    { name = "torch-spline-conv" },
 ]
 transformers = [
     { name = "accelerate" },
@@ -2780,10 +2792,12 @@ requires-dist = [
     { name = "openml", specifier = ">=0.14.0,<1" },
     { name = "pandas", specifier = ">=1.5.0,<3" },
     { name = "platformdirs", specifier = ">=4.3.7,<5" },
+    { name = "plexe", extras = ["pyg-extensions"], marker = "extra == 'all'" },
     { name = "pooch", specifier = ">=1.8.0,<2" },
     { name = "psycopg2-binary", specifier = ">=2.9.9,<3" },
     { name = "pyarrow", specifier = ">=19.0.0,<20" },
     { name = "pydantic", specifier = ">=2.9.2,<3" },
+    { name = "pyg-lib", marker = "extra == 'pyg-extensions'", specifier = ">=0.4.0" },
     { name = "python-dotenv", specifier = ">=1.2.0,<2" },
     { name = "python-multipart", specifier = ">=0.0.16" },
     { name = "pytorch-frame", specifier = ">=0.3.0,<0.4" },
@@ -2803,7 +2817,11 @@ requires-dist = [
     { name = "tokenizers", marker = "extra == 'all'", specifier = ">=0.21.1,<1" },
     { name = "tokenizers", marker = "extra == 'transformers'", specifier = ">=0.21.1,<1" },
     { name = "torch", specifier = ">=2.3.0,<3" },
+    { name = "torch-cluster", marker = "extra == 'pyg-extensions'", specifier = ">=1.6.0" },
     { name = "torch-geometric", specifier = ">=2.5.0,<3" },
+    { name = "torch-scatter", marker = "extra == 'pyg-extensions'", specifier = ">=2.1.0" },
+    { name = "torch-sparse", marker = "extra == 'pyg-extensions'", specifier = ">=0.6.18" },
+    { name = "torch-spline-conv", marker = "extra == 'pyg-extensions'", specifier = ">=1.2.0" },
     { name = "transformers", marker = "extra == 'all'", specifier = ">=4.50.0,<6" },
     { name = "transformers", marker = "extra == 'transformers'", specifier = ">=4.50.0,<6" },
     { name = "uvicorn", extras = ["standard"], marker = "extra == 'all'", specifier = ">=0.34.2,<1" },
@@ -2812,7 +2830,7 @@ requires-dist = [
     { name = "websockets", marker = "extra == 'chatui'", specifier = ">=12.0,<17" },
     { name = "xgboost", specifier = ">=2.1.3,<4" },
 ]
-provides-extras = ["transformers", "chatui", "all"]
+provides-extras = ["transformers", "chatui", "pyg-extensions", "all"]
 
 [package.metadata.requires-dev]
 dev = [
@@ -3156,6 +3174,17 @@ dependencies = [
 sdist = { url = "https://files.pythonhosted.org/packages/52/6d/fffca34caecc4a3f97bda81b2098da5e8ab7efc9a66e819074a11955d87e/pydantic_settings-2.13.1.tar.gz", hash = "sha256:b4c11847b15237fb0171e1462bf540e294affb9b86db4d9aa5c01730bdbe4025", size = 223826, upload-time = "2026-02-19T13:45:08.055Z" }
 wheels = [
     { url = "https://files.pythonhosted.org/packages/00/4b/ccc026168948fec4f7555b9164c724cf4125eac006e176541483d2c959be/pydantic_settings-2.13.1-py3-none-any.whl", hash = "sha256:d56fd801823dbeae7f0975e1f8c8e25c258eb75d278ea7abb5d9cebb01b56237", size = 58929, upload-time = "2026-02-19T13:45:06.034Z" },
+]
+
+[[package]]
+name = "pyg-lib"
+version = "0.6.0.dev20260312+pt210cu128"
+source = { registry = "https://data.pyg.org/whl/nightly/torch-2.10.0+cu128.html" }
+wheels = [
+    { url = "https://data.pyg.org/whl/nightly/torch-2.10.0%2Bcu128/pyg_lib-0.6.0.dev20260312%2Bpt210cu128-cp311-cp311-manylinux_2_28_x86_64.whl" },
+    { url = "https://data.pyg.org/whl/nightly/torch-2.10.0%2Bcu128/pyg_lib-0.6.0.dev20260312%2Bpt210cu128-cp311-cp311-win_amd64.whl" },
+    { url = "https://data.pyg.org/whl/nightly/torch-2.10.0%2Bcu128/pyg_lib-0.6.0.dev20260312%2Bpt210cu128-cp312-cp312-manylinux_2_28_x86_64.whl" },
+    { url = "https://data.pyg.org/whl/nightly/torch-2.10.0%2Bcu128/pyg_lib-0.6.0.dev20260312%2Bpt210cu128-cp312-cp312-win_amd64.whl" },
 ]
 
 [[package]]
@@ -4330,6 +4359,20 @@ wheels = [
 ]
 
 [[package]]
+name = "torch-cluster"
+version = "1.6.3+pt210cu128"
+source = { registry = "https://data.pyg.org/whl/torch-2.10.0+cu128.html" }
+dependencies = [
+    { name = "scipy" },
+]
+wheels = [
+    { url = "https://data.pyg.org/whl/torch-2.10.0%2Bcu128/torch_cluster-1.6.3%2Bpt210cu128-cp311-cp311-linux_x86_64.whl" },
+    { url = "https://data.pyg.org/whl/torch-2.10.0%2Bcu128/torch_cluster-1.6.3%2Bpt210cu128-cp311-cp311-win_amd64.whl" },
+    { url = "https://data.pyg.org/whl/torch-2.10.0%2Bcu128/torch_cluster-1.6.3%2Bpt210cu128-cp312-cp312-linux_x86_64.whl" },
+    { url = "https://data.pyg.org/whl/torch-2.10.0%2Bcu128/torch_cluster-1.6.3%2Bpt210cu128-cp312-cp312-win_amd64.whl" },
+]
+
+[[package]]
 name = "torch-geometric"
 version = "2.7.0"
 source = { registry = "https://pypi.org/simple" }
@@ -4347,6 +4390,42 @@ dependencies = [
 sdist = { url = "https://files.pythonhosted.org/packages/75/63/b210152635902da7fe79fcdd16517fae108f457a0ed22c737e702a9afbae/torch_geometric-2.7.0.tar.gz", hash = "sha256:f9099e4aece1a9f618c84dbaac33a77f43139736698c7e8bddf3301ef1f2e8d4", size = 876725, upload-time = "2025-10-15T20:48:03.443Z" }
 wheels = [
     { url = "https://files.pythonhosted.org/packages/1e/d3/4dffd7300500465e0b4a2ae917dcb2ce771de0b9a772670365799a27c024/torch_geometric-2.7.0-py3-none-any.whl", hash = "sha256:6e0cd3ad824d484651ef5d308fc66c687bfcf5ba040d56d1e0fe0f81f365e292", size = 1275346, upload-time = "2025-10-15T20:48:01.949Z" },
+]
+
+[[package]]
+name = "torch-scatter"
+version = "2.1.2+pt210cu128"
+source = { registry = "https://data.pyg.org/whl/torch-2.10.0+cu128.html" }
+wheels = [
+    { url = "https://data.pyg.org/whl/torch-2.10.0%2Bcu128/torch_scatter-2.1.2%2Bpt210cu128-cp311-cp311-linux_x86_64.whl" },
+    { url = "https://data.pyg.org/whl/torch-2.10.0%2Bcu128/torch_scatter-2.1.2%2Bpt210cu128-cp311-cp311-win_amd64.whl" },
+    { url = "https://data.pyg.org/whl/torch-2.10.0%2Bcu128/torch_scatter-2.1.2%2Bpt210cu128-cp312-cp312-linux_x86_64.whl" },
+    { url = "https://data.pyg.org/whl/torch-2.10.0%2Bcu128/torch_scatter-2.1.2%2Bpt210cu128-cp312-cp312-win_amd64.whl" },
+]
+
+[[package]]
+name = "torch-sparse"
+version = "0.6.18+pt210cu128"
+source = { registry = "https://data.pyg.org/whl/torch-2.10.0+cu128.html" }
+dependencies = [
+    { name = "scipy" },
+]
+wheels = [
+    { url = "https://data.pyg.org/whl/torch-2.10.0%2Bcu128/torch_sparse-0.6.18%2Bpt210cu128-cp311-cp311-linux_x86_64.whl" },
+    { url = "https://data.pyg.org/whl/torch-2.10.0%2Bcu128/torch_sparse-0.6.18%2Bpt210cu128-cp311-cp311-win_amd64.whl" },
+    { url = "https://data.pyg.org/whl/torch-2.10.0%2Bcu128/torch_sparse-0.6.18%2Bpt210cu128-cp312-cp312-linux_x86_64.whl" },
+    { url = "https://data.pyg.org/whl/torch-2.10.0%2Bcu128/torch_sparse-0.6.18%2Bpt210cu128-cp312-cp312-win_amd64.whl" },
+]
+
+[[package]]
+name = "torch-spline-conv"
+version = "1.2.2+pt210cu128"
+source = { registry = "https://data.pyg.org/whl/torch-2.10.0+cu128.html" }
+wheels = [
+    { url = "https://data.pyg.org/whl/torch-2.10.0%2Bcu128/torch_spline_conv-1.2.2%2Bpt210cu128-cp311-cp311-linux_x86_64.whl" },
+    { url = "https://data.pyg.org/whl/torch-2.10.0%2Bcu128/torch_spline_conv-1.2.2%2Bpt210cu128-cp311-cp311-win_amd64.whl" },
+    { url = "https://data.pyg.org/whl/torch-2.10.0%2Bcu128/torch_spline_conv-1.2.2%2Bpt210cu128-cp312-cp312-linux_x86_64.whl" },
+    { url = "https://data.pyg.org/whl/torch-2.10.0%2Bcu128/torch_spline_conv-1.2.2%2Bpt210cu128-cp312-cp312-win_amd64.whl" },
 ]
 
 [[package]]

@@ -251,7 +251,7 @@ def main():
     # Get tables for requested splits
     gen_tables = {}
     for split in splits:
-        gen_tables[split] = gen_task.get_table(split)
+        gen_tables[split] = gen_task.get_table(split, mask_input_cols=False)
 
     # -----------------------------------------------------------------------
     # Step 2: Build graph and model, run inference

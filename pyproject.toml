@@ -82,6 +82,13 @@ chatui = [
     "uvicorn[standard]>=0.34.2,<1",
     "websockets>=12.0,<17",
 ]
+pyg-extensions = [
+    "pyg-lib>=0.4.0",
+    "torch-scatter>=2.1.0",
+    "torch-sparse>=0.6.18",
+    "torch-cluster>=1.6.0",
+    "torch-spline-conv>=1.2.0",
+]
 all = [
     "transformers>=4.50.0,<6",
     "tokenizers>=0.21.1,<1",
@@ -91,6 +98,7 @@ all = [
     "fastapi>=0.115.12,<1",
     "uvicorn[standard]>=0.34.2,<1",
     "websockets>=12.0,<17",
+    "plexe[pyg-extensions]",
 ]
 
 [project.scripts]
@@ -139,6 +147,19 @@ exclude = '''
 [tool.ruff]
 line-length = 120
 target-version = "py312"
+
+[tool.uv]
+find-links = [
+    "https://data.pyg.org/whl/torch-2.10.0+cu128.html",
+    "https://data.pyg.org/whl/nightly/torch-2.10.0+cu128.html",
+]
+no-build-package = [
+    "pyg-lib",
+    "torch-scatter",
+    "torch-sparse",
+    "torch-cluster",
+    "torch-spline-conv",
+]
 
 [tool.ruff.lint]
 ignore = [

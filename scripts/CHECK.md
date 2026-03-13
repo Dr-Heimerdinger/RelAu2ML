@@ -10,7 +10,7 @@ Run all commands from the **project root** directory. These scripts are designed
 
 ## Script 1: Download Author Tables
 
-Downloads author-defined val/test ground truth tables and saves them as parquet files.
+Downloads author-defined val/test ground truth tables and saves them as **parquet and CSV** files.
 
 ### Basic Usage
 
@@ -42,7 +42,8 @@ python scripts/download_author_tables.py --dataset rel-f1 --output-dir /path/to/
 | `--task` | all | Task name (e.g. `driver-dnf`, `user-churn`) |
 | `--output-dir` | `./data/author_tables` | Root output directory |
 | `--splits` | `val,test` | Comma-separated splits to download |
-| `--force` | off | Re-download even if parquet exists |
+| `--force` | off | Re-download even if parquet/csv exists |
+| `--no-csv` | off | Skip saving CSV files (only save parquet) |
 
 ### Output Structure
 
@@ -51,20 +52,30 @@ data/author_tables/
   rel-f1/
     driver-position/
       val.parquet
+      val.csv
       test.parquet
+      test.csv
     driver-dnf/
       val.parquet
+      val.csv
       test.parquet
+      test.csv
     driver-top3/
       val.parquet
+      val.csv
       test.parquet
+      test.csv
     driver-race-compete/
       val.parquet
+      val.csv
       test.parquet
+      test.csv
   rel-amazon/
     user-churn/
       val.parquet
+      val.csv
       test.parquet
+      test.csv
     ...
 ```
 
@@ -218,3 +229,4 @@ python scripts/compare_predictions.py \
 | `Cannot import GenDataset` | The session's `dataset.py` may have path issues -- check `csv_dir` inside it |
 | `No predictions generated` | The data loader returned empty batches -- check that `csv_files/` has valid data |
 | `Matched rows = 0` | The GenTask and author task may define different entity/time columns or time ranges |
+| `ImportError: 'NeighborSampler' requires either 'pyg-lib' or 'torch-sparse'` | Install PyG C++ extensions: `pip install pyg_lib torch_scatter torch_sparse torch_cluster torch_spline_conv -f https://data.pyg.org/whl/torch-$(python -c "import torch; print(torch.__version__)").html` (pyg_lib may need the nightly index) |
