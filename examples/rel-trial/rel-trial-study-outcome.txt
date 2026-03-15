@@ -1,4 +1,4 @@
-I am working with the data is loaded into the `trial` database (connection string: `postgresql+psycopg2://mlflow:mlflow@postgres:5432/trial`).
+I am working with the data is loaded into the `trial_full` database (connection string: `postgresql+psycopg2://mlflow:mlflow@postgres:5432/trial_full`).
 I want to define a predictive task on this relational database.
 - Database Description: The clinical trial database is curated from AACT initiative, which consolidates all protocol and results data from studies registered on ClinicalTrials.gov. It offers extensive information about clinical trials, including study designs, participant demographics, intervention details, and outcomes. It is an important resource for health research, policy making, and therapeutic development.
 - Task definition: Predict if the trials will achieve its primary outcome (defined as p-value < 0.05)

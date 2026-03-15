@@ -91,6 +91,8 @@ test_sql_query("{csv_dir}", query)
 ```
 Verify the output columns are `[time_col, entity_col, target_col]` (or `[time_col, src_entity_col, dst_entity_col]` for link prediction). Verify row counts are non-zero.
 
+**Performance Note**: The training script enforces a 90-minute timeout for task.get_table() calls. If your query approaches this limit during testing, it will likely fail in production. Optimize using patterns from Part 8.5.
+
 **Step 7.** Save the class:
 ```
 register_task_code(code, "GenTask", "{working_dir}/task.py", task_type)
@@ -785,6 +787,96 @@ Must EXACTLY match the table key used in `db.table_dict`. This is the CSV filena
 12. **Table name casing**: `entity_table` must match the key in `db.table_dict` exactly. If the dataset uses `"UserInfo"` as the table key, you must write `entity_table = "UserInfo"`, not `"userinfo"`.
 13. **Too few training frames**: If the total data range is narrow (< 3 months) or data_range / timedelta < 5, you MUST set `num_eval_timestamps = 40`. Without it, the framework generates too few training timestamps and crashes with `RuntimeError: The number of training time frames is too few`.
 14. **Missing categorical filters**: When entity or event tables have low-cardinality "type" columns (PostTypeId, VoteTypeId, StatusId, outcome_type), failing to filter by the relevant type produces a training table with mixed entity/event subtypes and inflated row counts. Always check `schema_hints.categorical_columns` from `analyze_task_structure()` and add WHERE filters for the task-relevant values. Also check `schema_hints.sentinel_warnings` for entity ID sentinel values (-1, NULL) that should be excluded.
+
+---
+
+## Part 8.5 -- SQL Performance Optimization for Large Datasets
+
+When working with datasets containing millions of rows (e.g., Avito with 9M+ rows in searchstream, Amazon with 100M+ events), SQL query performance is critical. Poor query design can cause task table generation to hang indefinitely.
+
+### Critical Performance Patterns
+
+**1. AVOID Cartesian Products**
+```sql
+-- BAD: Creates N×M rows before filtering
+FROM timestamp_df, (SELECT DISTINCT UserID FROM visitstream WHERE UserID IS NOT NULL)
+
+-- GOOD: Use EXISTS for existence checks (stops at first match)
+WHERE EXISTS (SELECT 1 FROM visitstream v WHERE v.UserID = entity.UserID AND ...)
+```
+
+**2. Use EXISTS Instead of IN for Large Subqueries**
+```sql
+-- BAD: Materializes entire subquery result
+WHERE entity_id IN (SELECT entity_id FROM huge_table WHERE ...)
+
+-- GOOD: Stops searching after first match
+WHERE EXISTS (SELECT 1 FROM huge_table WHERE entity_id = outer.entity_id AND ...)
+```
+
+**3. Aggregate Early to Reduce Data Volume**
+```sql
+-- BAD: Join full tables then aggregate
+FROM users u
+LEFT JOIN events e ON u.id = e.user_id
+GROUP BY u.id
+
+-- GOOD: Pre-aggregate before joining
+FROM users u
+LEFT JOIN (
+    SELECT user_id, COUNT(*) as event_count
+    FROM events
+    WHERE event_date > cutoff
+    GROUP BY user_id
+) e_agg ON u.id = e_agg.user_id
+```
+
+**4. Use Selective Joins Instead of Cross Joins**
+```sql
+-- BAD: Cross join creates massive intermediate result
+FROM timestamp_df t, users u
+WHERE EXISTS (...)
+
+-- GOOD: Join with selective criteria
+FROM timestamp_df t
+JOIN users u ON EXISTS (
+    SELECT 1 FROM events e
+    WHERE e.user_id = u.id
+    AND e.event_date > t.timestamp - INTERVAL '7 days'
+)
+```
+
+**5. Add Index Hints via Column Order**
+DuckDB benefits from filtering on indexed columns first:
+```sql
+-- Put primary key and timestamp filters first
+WHERE entity_id = outer.entity_id  -- Primary key filter
+  AND event_time > timestamp        -- Timestamp filter
+  AND other_condition               -- Other filters
+```
+
+### Dataset-Specific Optimizations
+
+For datasets identified as large (1M+ rows in event tables), consider:
+
+1. **Avito/Amazon/Event datasets**: These have optimized SQL in `/data/anhtdt/RelAu2ML/plexe/relbench/tasks/`
+   - Avito: Uses EXISTS and selective WHERE clauses
+   - Amazon: Pre-filters with CTEs before joins
+   - Event: Uses window functions efficiently
+
+2. **Add sampling for debugging**: When testing, add `LIMIT 1000` to validate logic before full run
+
+3. **Monitor query execution**: The training script now has a 90-minute timeout for table generation. If hit, the query needs optimization.
+
+### Warning Signs Your Query Needs Optimization
+
+- Cross join with large tables (FROM table1, table2)
+- Multiple LEFT JOINs without aggregation
+- IN subqueries with >100K results
+- No WHERE clause on large table scans
+- Missing time boundaries in temporal queries
+
+When `analyze_task_structure()` reports row counts >1M, pay special attention to query efficiency.
 
 ---
 

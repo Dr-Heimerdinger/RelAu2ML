@@ -1,4 +1,4 @@
-I am working with the data is loaded into the `hm` database (connection string: `postgresql+psycopg2://mlflow:mlflow@postgres:5432/hm`).
+I am working with the data is loaded into the `hm_full` database (connection string: `postgresql+psycopg2://mlflow:mlflow@postgres:5432/hm_full`).
 I want to define a predictive task on this relational database.
 - Database Description: The H&M relational database hosts extensive customer and product data for online shopping experiences across its extensive network of brands and stores. This database includes detailed customer purchase histories and a rich set of metadata, encompassing everything from basic demographic information to extensive details about each product available.
 - Task definition:Predict the churn for a customer (no transactions) in the next week.

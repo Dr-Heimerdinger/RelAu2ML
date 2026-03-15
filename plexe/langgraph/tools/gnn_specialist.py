@@ -90,6 +90,8 @@ from dataset import {dataset_class_name}
 from task import {task_class_name}
 
 from plexe.relbench.modeling.graph import make_pkey_fkey_graph, get_node_train_table_input
+import signal
+import time
 from plexe.relbench.modeling.nn import HeteroEncoder, HeteroTemporalEncoder, HeteroGraphSAGE
 from plexe.relbench.modeling.utils import get_stype_proposal
 from torch_geometric.loader import NeighborLoader
@@ -97,6 +99,31 @@ from torch_geometric.nn import MLP
 
 device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 print(f"Using device: {{device}}")
+
+# --- Timeout wrapper for task table generation ---
+def timeout_handler(signum, frame):
+    raise TimeoutError("Task table generation exceeded 90 minutes")
+
+def get_table_with_timeout(task, split, timeout_seconds=5400):
+    \"\"\"Get task table with 90-minute timeout to prevent hanging on large datasets.\"\"\"
+    signal.signal(signal.SIGALRM, timeout_handler)
+    signal.alarm(timeout_seconds)
+    try:
+        start_time = time.time()
+        print(f"Generating {{split}} table (timeout: {{timeout_seconds//60}} minutes)...")
+        table = task.get_table(split)
+        elapsed = time.time() - start_time
+        print(f"{{split}} table generated in {{elapsed:.1f}} seconds")
+        return table
+    except TimeoutError as e:
+        print(f"ERROR: {{e}}")
+        print("Consider optimizing the SQL query in task.py:")
+        print("- Use EXISTS instead of JOINs for existence checks")
+        print("- Add selective WHERE clauses to reduce data volume")
+        print("- Use aggregation early to minimize intermediate results")
+        raise
+    finally:
+        signal.alarm(0)
 
 # --- Text Embedding (GloVe, with fallback to None) ---
 text_embedder_cfg = None
@@ -128,9 +155,9 @@ dataset = {dataset_class_name}(csv_dir=csv_dir)
 task = {task_class_name}(dataset)
 db = dataset.get_db()
 
-train_table = task.get_table("train")
-val_table = task.get_table("val")
-test_table = task.get_table("test")
+train_table = get_table_with_timeout(task, "train")
+val_table = get_table_with_timeout(task, "val")
+test_table = get_table_with_timeout(task, "test")
 
 print(f"Train samples: {{len(train_table)}}")
 print(f"Val samples: {{len(val_table)}}")
@@ -266,11 +293,30 @@ def _get_metric(metrics_dict, metric_name):
             return v
     return None
 
-# --- Training loop ---
+# --- Training loop with checkpoint saving and early stopping ---
 state_dict = None
 best_val_metric = -math.inf if higher_is_better else math.inf
+patience_counter = 0
+early_stop_patience = 5
+min_delta = 1e-6
+checkpoint_path = "{working_dir}/checkpoint.pt"
 
-for epoch in range(1, {epochs} + 1):
+# Try to load checkpoint if exists (for recovery from crashes)
+if os.path.exists(checkpoint_path):
+    try:
+        checkpoint = torch.load(checkpoint_path, weights_only=True)
+        model.load_state_dict(checkpoint['model_state'])
+        optimizer.load_state_dict(checkpoint['optimizer_state'])
+        best_val_metric = checkpoint.get('best_val_metric', best_val_metric)
+        start_epoch = checkpoint.get('epoch', 0) + 1
+        print(f"Loaded checkpoint from epoch {{checkpoint.get('epoch', 0)}}, best {{tune_metric}}={{best_val_metric:.4f}}")
+    except Exception as e:
+        print(f"Could not load checkpoint: {{e}}, starting fresh")
+        start_epoch = 1
+else:
+    start_epoch = 1
+
+for epoch in range(start_epoch, {epochs} + 1):
     # Train
     model.train()
     loss_accum = count_accum = 0
@@ -329,12 +375,51 @@ for epoch in range(1, {epochs} + 1):
         state_dict = copy.deepcopy(model.state_dict())
         continue
 
-    if (higher_is_better and current_val > best_val_metric) or (
-        not higher_is_better and current_val < best_val_metric
-    ):
+    # Check for improvement
+    improved = False
+    if higher_is_better:
+        improved = current_val > best_val_metric + min_delta
+    else:
+        improved = current_val < best_val_metric - min_delta
+
+    if improved:
         best_val_metric = current_val
         state_dict = copy.deepcopy(model.state_dict())
+        patience_counter = 0
         print(f"  -> New best model! {{tune_metric}}={{best_val_metric:.4f}}")
+
+        # Save checkpoint
+        checkpoint = {{
+            'epoch': epoch,
+            'model_state': model.state_dict(),
+            'optimizer_state': optimizer.state_dict(),
+            'best_val_metric': best_val_metric,
+            'tune_metric': tune_metric
+        }}
+        torch.save(checkpoint, checkpoint_path)
+        print(f"  -> Checkpoint saved to {{checkpoint_path}}")
+    else:
+        patience_counter += 1
+        print(f"  -> No improvement (patience: {{patience_counter}}/{{early_stop_patience}})")
+
+        # Still save checkpoint for recovery (but not as best model)
+        checkpoint = {{
+            'epoch': epoch,
+            'model_state': model.state_dict(),
+            'optimizer_state': optimizer.state_dict(),
+            'best_val_metric': best_val_metric,
+            'tune_metric': tune_metric
+        }}
+        torch.save(checkpoint, checkpoint_path)
+
+    # Early stopping check
+    if patience_counter >= early_stop_patience:
+        print(f"Early stopping triggered! No improvement for {{early_stop_patience}} epochs")
+        break
+
+    # Memory cleanup for GPU
+    if device.type == 'cuda':
+        torch.cuda.empty_cache()
 
 # --- Final Evaluation ---
 if state_dict is None:
@@ -380,6 +465,14 @@ else:
 # --- Save model & results ---
 torch.save(state_dict, "{working_dir}/best_model.pt")
 
+# Clean up checkpoint file (we have the best model saved)
+if os.path.exists(checkpoint_path):
+    try:
+        os.remove(checkpoint_path)
+        print(f"Checkpoint file cleaned up")
+    except:
+        pass
+
 def _to_json_safe(d):
     """Convert numpy/torch values to Python floats for JSON serialization."""
     return {{k: float(v) for k, v in d.items()}}
@@ -415,14 +508,14 @@ print(f"\\nTraining complete! Results saved to {working_dir}/training_results.js
 @langchain_tool
 def execute_training_script(
     script_path: str,
-    timeout: int = 14400
+    timeout: int = 43200
 ) -> Dict[str, Any]:
     """
     Execute a training script with real-time progress streaming.
 
     Args:
         script_path: Path to the training script
-        timeout: Maximum execution time in seconds
+        timeout: Maximum execution time in seconds (default: 12 hours)
 
     Returns:
         Execution results

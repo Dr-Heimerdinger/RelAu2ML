@@ -1,4 +1,4 @@
-I am working with the data is loaded into the `f1` database (connection string: `postgresql+psycopg2://mlflow:mlflow@postgres:5432/f1`).
+I am working with the data is loaded into the `f1_full` database (connection string: `postgresql+psycopg2://mlflow:mlflow@postgres:5432/f1_full`).
 I want to define a predictive task on this relational database.
 - Database Description: The F1 database tracks all-time Formula 1 racing data and statistics. It provides detailed information for various stakeholders including drivers, constructors, engine manufacturers, and tyre manufacturers. Highlights include data on all circuits (e.g. geographical details), and full historical data from every season. This includes overall standings, race results, and more specific data like practice sessions, qualifying positions, sprints, and pit stops.
 - Task definition:For each driver predict if they will qualify in the top-3 for a race in the next 1 month.
