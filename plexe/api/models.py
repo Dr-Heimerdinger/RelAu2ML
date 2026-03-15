@@ -1,5 +1,6 @@
 import json
 import logging
+import math
 import os
 import shutil
 import subprocess
@@ -38,10 +39,26 @@ def _scan_models() -> list:
         model_path = folder / "best_model.pt"
         if not model_path.exists():
             continue
-        info = _read_model_info(folder)
-        if info:
-            models.append(info)
+        try:
+            info = _read_model_info(folder)
+            if info:
+                models.append(info)
+        except Exception as e:
+            logger.warning(f"Skipping model folder {folder.name}: {e}")
     return models
+
+
+def _json_safe(value):
+    """Recursively convert NaN/Inf values to None for JSON-safe responses."""
+    if isinstance(value, float):
+        if math.isnan(value) or math.isinf(value):
+            return None
+        return value
+    if isinstance(value, dict):
+        return {k: _json_safe(v) for k, v in value.items()}
+    if isinstance(value, list):
+        return [_json_safe(v) for v in value]
+    return value
 
 
 def _read_model_info(folder: Path) -> Optional[dict]:
@@ -86,7 +103,7 @@ def _read_model_info(folder: Path) -> Optional[dict]:
     if csv_dir.exists():
         info["csv_files"] = [f.name for f in csv_dir.iterdir() if f.suffix == ".csv"]
 
-    return info
+    return _json_safe(info)
 
 
 def _parse_task_file(task_path: Path) -> dict:
