@@ -166,7 +166,14 @@ EXECUTE THE TOOL CALL NOW.
             schema = state["schema_info"]
             tables = list(schema.get("tables", {}).keys())
             context_parts.append(f"Tables: {', '.join(tables)}")
-            
+
+            # Include per-table column names so the LLM knows exactly which
+            # columns belong to each table (prevents cross-table hallucination)
+            for tname, tinfo in schema.get("tables", {}).items():
+                cols = [c["name"] for c in tinfo.get("columns", [])]
+                if cols:
+                    context_parts.append(f"  {tname} columns: {cols}")
+
             if schema.get("relationships"):
                 rels = []
                 for r in schema["relationships"]:

@@ -106,7 +106,7 @@ def export_tables_to_csv(
             try:
                 df = pd.read_sql_table(table, engine)
                 file_path = os.path.join(output_dir, f"{table}.csv")
-                df.to_csv(file_path, index=False)
+                df.to_csv(file_path, index=False, date_format="%Y-%m-%d %H:%M:%S")
                 exported.append({
                     "table": table,
                     "path": file_path,

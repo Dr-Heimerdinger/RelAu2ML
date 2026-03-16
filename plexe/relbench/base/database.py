@@ -1,3 +1,4 @@
+import logging
 import os
 from functools import lru_cache
 from pathlib import Path
@@ -7,6 +8,8 @@ import pandas as pd
 from typing_extensions import Self
 
 from .table import Table
+
+logger = logging.getLogger(__name__)
 
 
 class Database:
@@ -96,11 +99,30 @@ class Database:
                 ser = table.df[table.pkey_col]
 
                 if ser.nunique() != len(ser):
-                    raise RuntimeError(
-                        f"The primary key '{table.pkey_col}' "
-                        f"of table '{table_name}' contains "
-                        "duplicated elements"
+                    # Check if any other table references this one via foreign key
+                    referenced_by = any(
+                        pk_table == table_name
+                        for other_table in self.table_dict.values()
+                        for pk_table in other_table.fkey_col_to_pkey_table.values()
                     )
+                    if referenced_by:
+                        # Cannot safely demote — deduplicate by keeping first occurrence
+                        logger.warning(
+                            f"Primary key '{table.pkey_col}' of table '{table_name}' has duplicates "
+                            f"({ser.nunique()} unique / {len(ser)} total). "
+                            f"Deduplicating (keeping first occurrence) since other tables reference it."
+                        )
+                        table.df = table.df.drop_duplicates(subset=[table.pkey_col], keep="first").reset_index(drop=True)
+                        ser = table.df[table.pkey_col]
+                    else:
+                        # Safe to demote — no other table references this one
+                        logger.warning(
+                            f"Primary key '{table.pkey_col}' of table '{table_name}' has duplicates "
+                            f"({ser.nunique()} unique / {len(ser)} total). "
+                            f"Demoting to event table (pkey_col=None)."
+                        )
+                        table.pkey_col = None
+                        continue
                 arange_ser = pd.RangeIndex(len(ser)).astype("Int64")
                 index_map_dict[table_name] = pd.Series(
                     index=ser,

@@ -44,19 +44,19 @@ def _match_known_dataset(db_name: str) -> Optional[Tuple[str, str]]:
 def get_csv_files_info(csv_dir: str) -> Dict[str, Any]:
     """
     Get information about CSV files in a directory.
-    
+
     Args:
         csv_dir: Directory containing CSV files (relative or absolute path)
-    
+
     Returns:
         Dictionary with file information
     """
     import os
     import pandas as pd
-    
+
     # Convert to absolute path if needed
     csv_dir = os.path.abspath(csv_dir)
-    
+
     # Check if directory exists
     if not os.path.exists(csv_dir):
         return {
@@ -73,7 +73,7 @@ def get_csv_files_info(csv_dir: str) -> Dict[str, Any]:
             "files": [],
             "count": 0
         }
-    
+
     files = []
     try:
         for f in os.listdir(csv_dir):
@@ -97,7 +97,7 @@ def get_csv_files_info(csv_dir: str) -> Dict[str, Any]:
             "files": [],
             "count": 0
         }
-    
+
     return {"files": files, "count": len(files), "directory": csv_dir}
 
 
@@ -119,10 +119,10 @@ def get_temporal_statistics(csv_dir: str, db_name: str = "") -> Dict[str, Any]:
     """
     import pandas as pd
     import os
-    
+
     # Convert to absolute path if needed
     csv_dir = os.path.abspath(csv_dir)
-    
+
     # Check if directory exists
     if not os.path.exists(csv_dir):
         return {
@@ -139,12 +139,12 @@ def get_temporal_statistics(csv_dir: str, db_name: str = "") -> Dict[str, Any]:
 
     temporal_stats = {}
     all_timestamps = []
-    
+
     # Minimum valid year for timestamps - filters out Unix epoch false positives
     # when integer IDs get parsed as microseconds from 1970-01-01
     MIN_VALID_YEAR = 1900
     MAX_VALID_YEAR = 2100
-    
+
     try:
         dir_files = os.listdir(csv_dir)
     except Exception as e:
@@ -153,48 +153,48 @@ def get_temporal_statistics(csv_dir: str, db_name: str = "") -> Dict[str, Any]:
             "temporal_stats": {},
             "suggested_splits": {}
         }
-    
+
     for f in dir_files:
         if not f.endswith('.csv'):
             continue
-        
+
         table_name = f.replace('.csv', '')
         file_path = os.path.join(csv_dir, f)
-        
+
         try:
             df = pd.read_csv(file_path)
             table_temporal = {}
-            
+
             for col in df.columns:
                 # Skip columns that are likely ID columns based on name
                 col_lower = col.lower()
                 if col_lower.endswith('id') or col_lower == 'id':
                     continue
-                
+
                 try:
                     parsed = pd.to_datetime(df[col], errors='coerce', format='mixed')
                     valid_count = parsed.notna().sum()
                     if valid_count > len(df) * 0.5:
                         min_ts = parsed.min()
                         max_ts = parsed.max()
-                        
+
                         # Filter out false positives: timestamps near Unix epoch
-                        # These are usually integer columns (IDs) being parsed as 
+                        # These are usually integer columns (IDs) being parsed as
                         # microseconds from 1970-01-01
                         if pd.notna(min_ts) and pd.notna(max_ts):
                             min_year = min_ts.year
                             max_year = max_ts.year
-                            
+
                             # Skip if timestamps are outside reasonable range
                             if min_year < MIN_VALID_YEAR or max_year > MAX_VALID_YEAR:
                                 continue
-                            
+
                             # Skip if the range is suspiciously small (< 1 day)
                             # This catches integer columns parsed as microseconds
                             time_range = (max_ts - min_ts).total_seconds()
                             if time_range < 86400:  # Less than 1 day in seconds
                                 continue
-                        
+
                         table_temporal[col] = {
                             "min": str(min_ts),
                             "max": str(max_ts),
@@ -203,12 +203,12 @@ def get_temporal_statistics(csv_dir: str, db_name: str = "") -> Dict[str, Any]:
                         all_timestamps.extend(parsed.dropna().tolist())
                 except:
                     pass
-            
+
             if table_temporal:
                 temporal_stats[table_name] = table_temporal
         except Exception as e:
             temporal_stats[table_name] = {"error": str(e)}
-    
+
     suggested_splits = {}
     if all_timestamps:
         # Use unique timestamps sorted by date for better split calculation
@@ -290,7 +290,7 @@ def get_temporal_statistics(csv_dir: str, db_name: str = "") -> Dict[str, Any]:
             suggested_splits = {
                 "error": "Not enough unique timestamps to create proper splits"
             }
-    
+
     return {
         "temporal_stats": temporal_stats,
         "suggested_splits": suggested_splits
@@ -305,23 +305,23 @@ def register_dataset_code(
 ) -> Dict[str, str]:
     """
     Register generated Dataset class code.
-    
+
     Args:
         code: Python code for the Dataset class
         class_name: Name of the Dataset class
         file_path: Path where the code will be saved
-    
+
     Returns:
         Registration status
     """
     import os
     import ast
-    
+
     os.makedirs(os.path.dirname(file_path), exist_ok=True)
-    
+
     # Sanitize the code - handle escaped characters from JSON serialization
     sanitized_code = code
-    
+
     # Check if the code has JSON-style escaping (e.g., \\n instead of real newlines)
     # This typically happens when LLM output gets double-serialized
     if '\\n' in code and '\n' not in code:
@@ -336,12 +336,12 @@ def register_dataset_code(
             sanitized_code = sanitized_code.replace('\\t', '\t')
             sanitized_code = sanitized_code.replace('\\"', '"')
             sanitized_code = sanitized_code.replace("\\'", "'")
-    
+
     # Additional fix: handle backslash-escaped triple quotes that break f-strings
     # Pattern: f\"\"\" should become f"""
     if '\\"\\"\\"' in sanitized_code:
         sanitized_code = sanitized_code.replace('\\"\\"\\"', '"""')
-    
+
     syntax_warnings = []
     try:
         ast.parse(sanitized_code)
@@ -352,6 +352,75 @@ def register_dataset_code(
 
     with open(file_path, 'w') as f:
         f.write(sanitized_code)
+
+    # --- Runtime validation: try to import and call make_db() ---
+    # This catches errors like KeyError for wrong column names before the
+    # pipeline proceeds to task building / training.
+    csv_dir = os.path.join(os.path.dirname(file_path), "csv_files")
+    validation_error = None
+    if not syntax_warnings and os.path.isdir(csv_dir):
+        import importlib.util
+        import sys
+        import threading
+
+        module_name = f"_dataset_validation_{os.getpid()}"
+
+        # Run validation in a daemon thread with a timeout.
+        # signal.alarm() only works in the main thread, and LangGraph tool
+        # calls run in worker threads, so we use threading instead.
+        validation_exc = [None]  # mutable container for thread result
+
+        def _validate():
+            try:
+                spec = importlib.util.spec_from_file_location(module_name, file_path)
+                mod = importlib.util.module_from_spec(spec)
+                sys.modules[module_name] = mod
+                spec.loader.exec_module(mod)
+
+                dataset_cls = getattr(mod, class_name)
+                dataset_obj = dataset_cls(csv_dir)
+                dataset_obj.make_db()
+            except Exception as exc:
+                validation_exc[0] = exc
+
+        t = threading.Thread(target=_validate, daemon=True)
+        t.start()
+        t.join(timeout=120)
+
+        if t.is_alive():
+            # Validation timed out — keep the file but warn
+            import logging
+            logging.warning("Dataset validation timed out (120s), keeping file")
+        elif validation_exc[0] is not None:
+            exc = validation_exc[0]
+            validation_error = f"{type(exc).__name__}: {exc}"
+            import logging
+            logging.warning(f"Dataset validation failed: {validation_error}")
+            # Delete the broken file so the retry loop re-triggers
+            try:
+                os.remove(file_path)
+            except OSError:
+                pass
+
+        # Clean up sys.modules and __pycache__
+        sys.modules.pop(module_name, None)
+        pycache = os.path.join(os.path.dirname(file_path), "__pycache__")
+        if os.path.isdir(pycache):
+            import shutil
+            shutil.rmtree(pycache, ignore_errors=True)
+
+    if validation_error:
+        return {
+            "status": "validation_error",
+            "error": validation_error,
+            "class_name": class_name,
+            "file_path": file_path,
+            "message": (
+                f"The generated code failed runtime validation: {validation_error}. "
+                "The file has been DELETED. Please fix the code and call "
+                "register_dataset_code() again."
+            ),
+        }
 
     result = {
         "status": "registered_with_warnings" if syntax_warnings else "registered",

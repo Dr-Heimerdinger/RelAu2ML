@@ -283,35 +283,11 @@ async def combine_datasets_endpoint(data: CombineDatasetsRequest):
         for table_name in data.tables:
             df = pd.read_sql_query(f"SELECT * FROM {table_name}", conn)
             file_path = db_dir / f"{table_name}.csv"
-            df.to_csv(file_path, index=False)
+            df.to_csv(file_path, index=False, date_format="%Y-%m-%d %H:%M:%S")
             table_paths[table_name] = str(file_path.resolve())
 
         conn.close()
 
-        # session_id = str(uuid.uuid4())
-        # agent = FeatureGeneratorAgent(
-        #     session_id=session_id,
-        #     tables=data.tables,
-        #     relationships=data.relationships,
-        # )
-        # task = f"""Generate features from the provided tables and relationships.
-        # The data for the tables is available as CSV files.
-        # Here is the mapping from table name to file path:
-        # {table_paths}
-        #
-        # You must use the `read_file` tool to read the data for each table before processing it.
-        # """
-        # result = agent.run(task)
-
-        # if isinstance(result, pd.DataFrame):
-        #     destination_dir = db_dir
-        #     destination_path = destination_dir / "final_dataset.csv"
-        #     result.to_csv(destination_path, index=False)
-        #     message = "Dataset combination completed successfully."
-        #     logger.info(f"Saved final dataset to {destination_path}")
-        # else:
-        #     message = "Dataset combination finished, but the agent did not return a dataframe."
-        #     logger.error(f"Agent returned type {type(result)} instead of pandas.DataFrame.")
 
         message = "Feature generation is being migrated to a new multi-agent system."
 
