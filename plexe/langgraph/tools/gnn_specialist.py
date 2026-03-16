@@ -310,6 +310,7 @@ patience_counter = 0
 early_stop_patience = 5
 min_delta = 1e-6
 checkpoint_path = "{working_dir}/checkpoint.pt"
+epochs_configured = {epochs}
 
 # Try to load checkpoint if exists (for recovery from crashes)
 if os.path.exists(checkpoint_path):
@@ -326,7 +327,10 @@ if os.path.exists(checkpoint_path):
 else:
     start_epoch = 1
 
-for epoch in range(start_epoch, {epochs} + 1):
+epochs_trained = start_epoch - 1
+
+for epoch in range(start_epoch, epochs_configured + 1):
+    epochs_trained = epoch
     # Train
     model.train()
     loss_accum = count_accum = 0
@@ -370,14 +374,14 @@ for epoch in range(start_epoch, {epochs} + 1):
     # Guard: empty validation set
     if len(val_pred_list) == 0:
         empty_m = {{}}
-        print(f"Epoch {{epoch}}/{epochs}: Loss={{train_loss:.4f}}, Val metrics: {{empty_m}}")
+        print(f"Epoch {{epoch}}/{{epochs_configured}}: Loss={{train_loss:.4f}}, Val metrics: {{empty_m}}")
         print(f"  Warning: Validation produced 0 predictions, skipping metric computation")
         state_dict = copy.deepcopy(model.state_dict())
         continue
 
     val_pred = torch.cat(val_pred_list, dim=0).numpy()
     val_metrics = task.evaluate(val_pred, val_table)
-    print(f"Epoch {{epoch}}/{epochs}: Loss={{train_loss:.4f}}, Val metrics: {{val_metrics}}")
+    print(f"Epoch {{epoch}}/{{epochs_configured}}: Loss={{train_loss:.4f}}, Val metrics: {{val_metrics}}")
 
     current_val = _get_metric(val_metrics, tune_metric)
     if current_val is None:
@@ -493,12 +497,14 @@ results = {{
     "val_metrics": _to_json_safe(val_metrics),
     "test_metrics": _to_json_safe(test_metrics),
     "model_path": "{working_dir}/best_model.pt",
-    "epochs_trained": {epochs},
+    "epochs_trained": int(epochs_trained),
+    "epochs_configured": int(epochs_configured),
 }}
 
 with open("{working_dir}/training_results.json", "w") as f:
     json.dump(results, f, indent=2)
 
+print(f"Epochs trained: {{epochs_trained}}/{{epochs_configured}}")
 print(f"\\nTraining complete! Results saved to {working_dir}/training_results.json")
 '''
     
@@ -566,6 +572,8 @@ def execute_training_script(
     train_samples_pattern = re.compile(r"Train samples:\s+([\d,]+)")
     val_samples_pattern = re.compile(r"Val samples:\s+([\d,]+)")
     test_samples_pattern = re.compile(r"Test samples:\s+([\d,]+)")
+    # Matches: Epochs trained: 13/20
+    epochs_trained_pattern = re.compile(r"Epochs trained:\s+(\d+)(?:/(\d+))?")
     # Matches: Best Val metrics: {...}
     best_val_pattern = re.compile(r"Best Val metrics:\s+(\{.*\})")
     # Matches: Best Test metrics: {...}
@@ -581,6 +589,7 @@ def execute_training_script(
     best_metric_name = None
     best_metric_value = None
     total_epochs = None
+    trained_epochs = None
     stdout_lines = []
     stderr_lines = []
     _training_start_time = [None]  # mutable for closure access
@@ -607,7 +616,7 @@ def execute_training_script(
             return {}
 
     def _process_stdout_line(line):
-        nonlocal best_metric_name, best_metric_value, total_epochs
+        nonlocal best_metric_name, best_metric_value, total_epochs, trained_epochs
 
         # Check for epoch result
         m = epoch_pattern.search(line)
@@ -680,6 +689,14 @@ def execute_training_script(
             })
             return
 
+        # Actual epochs trained (important when early stopping triggers)
+        m = epochs_trained_pattern.search(line)
+        if m:
+            trained_epochs = int(m.group(1))
+            if m.group(2):
+                total_epochs = int(m.group(2))
+            return
+
         # Best val metrics
         m = best_val_pattern.search(line)
         if m:
@@ -704,9 +721,10 @@ def execute_training_script(
 
         # Training complete
         if training_complete_pattern.search(line):
+            completed_epoch = trained_epochs if trained_epochs is not None else (total_epochs or 0)
             _emit_progress({
                 "phase": "completed",
-                "current_epoch": total_epochs or 0,
+                "current_epoch": completed_epoch,
                 "total_epochs": total_epochs or 0,
                 "message": "Training complete!",
             })
