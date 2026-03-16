@@ -52,6 +52,8 @@ Additional requirements:
 - Set correct fkey_col_to_pkey_table mappings for each table
 - Assign appropriate time_col for temporal tables or None for static tables
 - Include necessary data cleaning code
+- **CRITICAL**: Never use .dt.time to convert time columns to datetime.time objects
+  This causes MulticategoricalTensorMapper errors. Keep time columns as strings or drop them.
 
 ## 5: MANDATORY - Call register_dataset_code(code, "GenDataset", file_path)
 This saves your generated code to disk.
@@ -85,9 +87,17 @@ class GenDataset(Dataset):
         table1 = pd.read_csv(os.path.join(path, "table1.csv"))
         table2 = pd.read_csv(os.path.join(path, "table2.csv"))
         
-        # Clean temporal columns - use pd.to_datetime with errors='coerce'
-        table1["timestamp_col"] = pd.to_datetime(table1["timestamp_col"], errors="coerce")
-        
+        # Clean temporal columns - use pd.to_datetime with format='mixed' for mixed formats
+        # This handles both "YYYY-MM-DD" and "YYYY-MM-DD HH:MM:SS" formats correctly
+        table1["timestamp_col"] = pd.to_datetime(table1["timestamp_col"], format='mixed', errors="coerce")
+
+        # IMPORTANT: DO NOT convert time columns to datetime.time objects using .dt.time
+        # This causes MulticategoricalTensorMapper errors in torch_frame
+        # Keep time columns as strings or drop them if not needed for the task
+        # BAD:  df["time"] = pd.to_datetime(df["time"]).dt.time  # Creates datetime.time objects
+        # GOOD: df["time"] = df["time"].astype(str)  # Keep as strings
+        # OR:   df = df.drop(columns=["time"])  # Drop if not needed
+
         # Clean missing values - replace \\N or empty strings with NaN
         table1 = table1.replace(r"^\\\\N$", np.nan, regex=True)
         

@@ -163,8 +163,18 @@ print(f"Train samples: {{len(train_table)}}")
 print(f"Val samples: {{len(val_table)}}")
 print(f"Test samples: {{len(test_table)}}")
 
-# --- Build Graph (stays on CPU; only batches move to GPU) ---
+# --- Build Graph  ---
 col_to_stype_dict = get_stype_proposal(db)
+
+# If text_embedder_cfg is None, convert text columns to categorical to avoid errors
+if text_embedder_cfg is None:
+    from torch_frame import stype
+    for table_name in col_to_stype_dict:
+        for col_name in list(col_to_stype_dict[table_name].keys()):
+            if col_to_stype_dict[table_name][col_name] == stype.text_embedded:
+                print(f"  Converting {{table_name}}.{{col_name}} from text to categorical (no embedder)")
+                col_to_stype_dict[table_name][col_name] = stype.categorical
+
 data, col_stats_dict = make_pkey_fkey_graph(
     db,
     col_to_stype_dict=col_to_stype_dict,

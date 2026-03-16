@@ -215,15 +215,16 @@ def get_temporal_statistics(csv_dir: str, db_name: str = "") -> Dict[str, Any]:
         unique_timestamps = sorted(list(set(all_timestamps)))
         n = len(unique_timestamps)
 
-        # If we matched a known dataset, validate that the data extends far
-        # enough for test_timestamp + timedelta (90 days).  If it does, use
-        # the author's timestamps; otherwise fall through to percentile logic.
+        # If we matched a known dataset, validate that the data extends at
+        # least past the test timestamp.  The exact headroom needed depends on
+        # the task's timedelta (unknown here), so we only require test_ts is
+        # within the data range.  The author's timestamps are curated and
+        # should be trusted when the data covers them.
         if known and n > 0:
-            TIMEDELTA_HEADROOM = pd.Timedelta(days=91)
             known_val, known_test = known
             known_test_ts = pd.Timestamp(known_test)
             data_max_ts = unique_timestamps[-1]
-            if known_test_ts + TIMEDELTA_HEADROOM <= data_max_ts:
+            if known_test_ts <= data_max_ts:
                 return {
                     "temporal_stats": temporal_stats,
                     "suggested_splits": {
@@ -235,18 +236,18 @@ def get_temporal_statistics(csv_dir: str, db_name: str = "") -> Dict[str, Any]:
                         "matched_db_name": db_name,
                     }
                 }
-            # else: data too short for author timestamps, fall through
+            # else: data doesn't reach test timestamp, fall through
 
         if n > 2:
             max_ts = unique_timestamps[-1]
             min_ts = unique_timestamps[0]
 
             # Reserve headroom after test_timestamp for the task's prediction
-            # window (timedelta).  Most RelBench tasks use 90 days; we use that
-            # as the default safety margin so that
-            #   test_timestamp + timedelta <= max_timestamp
-            # is satisfied at runtime.
-            TIMEDELTA_HEADROOM = pd.Timedelta(days=90)
+            # window.  Scale proportionally to data range (15%) so short-range
+            # datasets (e.g., Avito's 25 days) aren't rejected, while still
+            # reserving space for longer-range datasets.  Cap at 90 days.
+            data_range = max_ts - min_ts
+            TIMEDELTA_HEADROOM = min(pd.Timedelta(days=90), data_range * 0.15)
             MIN_GAP = pd.Timedelta(days=7)
 
             # test_timestamp must leave room for at least one timedelta
@@ -271,9 +272,10 @@ def get_temporal_statistics(csv_dir: str, db_name: str = "") -> Dict[str, Any]:
             if test_ts <= val_ts or test_ts <= min_ts:
                 suggested_splits = {
                     "error": (
-                        f"Dataset time range too short for a 90-day prediction "
-                        f"window. Range: {min_ts} to {max_ts} "
-                        f"({(max_ts - min_ts).days} days)."
+                        f"Dataset time range too short for meaningful splits. "
+                        f"Range: {min_ts} to {max_ts} "
+                        f"({(max_ts - min_ts).days} days), "
+                        f"headroom: {TIMEDELTA_HEADROOM.days} days."
                     )
                 }
             else:

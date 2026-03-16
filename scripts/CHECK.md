@@ -24,16 +24,6 @@ python scripts/download_author_tables.py --dataset rel-f1 --task driver-dnf
 # Download all datasets (takes a long time)
 python scripts/download_author_tables.py
 
-# Re-download even if files already exist
-python scripts/download_author_tables.py --dataset rel-f1 --force
-
-# Download only val split
-python scripts/download_author_tables.py --dataset rel-f1 --splits val
-
-# Custom output directory
-python scripts/download_author_tables.py --dataset rel-f1 --output-dir /path/to/output
-```
-
 ### Arguments
 
 | Argument | Default | Description |
@@ -45,45 +35,14 @@ python scripts/download_author_tables.py --dataset rel-f1 --output-dir /path/to/
 | `--force` | off | Re-download even if parquet/csv exists |
 | `--no-csv` | off | Skip saving CSV files (only save parquet) |
 
-### Output Structure
 
-```
-data/author_tables/
-  rel-f1/
-    driver-position/
-      val.parquet
-      val.csv
-      test.parquet
-      test.csv
-    driver-dnf/
-      val.parquet
-      val.csv
-      test.parquet
-      test.csv
-    driver-top3/
-      val.parquet
-      val.csv
-      test.parquet
-      test.csv
-    driver-race-compete/
-      val.parquet
-      val.csv
-      test.parquet
-      test.csv
-  rel-amazon/
-    user-churn/
-      val.parquet
-      val.csv
-      test.parquet
-      test.csv
-    ...
-```
+## Script 2: Compare Predictions (with Fairness Check)
 
----
+Re-runs model inference from a trained session, runs a **fairness check** (timestamp alignment, task definition, matched-row coverage), then compares predictions against author ground truth.
 
-## Script 2: Compare Predictions
+Model hyper-parameters (`num_neighbors`, `batch_size`, `num_layers`, `channels`) are **automatically read from the session's `train_script.py`** via regex — no hardcoded values. Falls back to author defaults (`num_neighbors=128`, `batch_size=512`) when parsing fails.
 
-Re-runs model inference from a trained session and compares predictions against author ground truth.
+> **Note:** `check_session_fairness.py` has been removed — its logic is now integrated here.
 
 ### Prerequisites
 
@@ -93,7 +52,7 @@ Re-runs model inference from a trained session and compares predictions against 
 ### Basic Usage
 
 ```bash
-# Compare a session against author tables
+# Compare a session against author tables (fairness check runs automatically)
 python scripts/compare_predictions.py \
     --session session-118b7368-9b68-4be4-9765-cf62de1abe12 \
     --dataset rel-f1 \
@@ -113,6 +72,20 @@ python scripts/compare_predictions.py \
     --task driver-dnf \
     --splits val
 
+# Skip fairness check (faster, e.g. in CI)
+python scripts/compare_predictions.py \
+    --session session-118b7368-9b68-4be4-9765-cf62de1abe12 \
+    --dataset rel-f1 \
+    --task driver-dnf \
+    --skip-fairness-check
+
+# Print the resolved model config and exit (no inference)
+python scripts/compare_predictions.py \
+    --session session-118b7368-9b68-4be4-9765-cf62de1abe12 \
+    --dataset rel-f1 \
+    --task driver-dnf \
+    --show-config
+
 # Use a custom workdir or author tables path
 python scripts/compare_predictions.py \
     --session session-118b7368-9b68-4be4-9765-cf62de1abe12 \
@@ -120,12 +93,6 @@ python scripts/compare_predictions.py \
     --task driver-dnf \
     --workdir /path/to/workdir \
     --author-tables-dir /path/to/author_tables
-
-# Pass a full absolute session path instead of a folder name
-python scripts/compare_predictions.py \
-    --session /absolute/path/to/session-folder \
-    --dataset rel-f1 \
-    --task driver-dnf
 ```
 
 ### Arguments
@@ -139,6 +106,8 @@ python scripts/compare_predictions.py \
 | `--author-tables-dir` | `./data/author_tables` | Path to downloaded author tables |
 | `--splits` | `val,test` | Comma-separated splits to compare |
 | `--output` | stdout | Save comparison JSON to file |
+| `--skip-fairness-check` | off | Skip the fairness-check section |
+| `--show-config` | off | Print resolved model config and exit |
 
 ### Output
 

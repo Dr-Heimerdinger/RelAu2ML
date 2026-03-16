@@ -605,6 +605,15 @@ def analyze_task_structure(
             "Link": "LEFT JOIN event table + GROUP BY source entity + LIST(DISTINCT dest entity).",
         }
 
+        # Recommend num_eval_timestamps when events are broadly sparse (not
+        # just outlier max gaps).  Use p90 gap only — max gap is too sensitive
+        # to outliers (e.g., Avito's 25d max gap in a 25d range with p90=0).
+        # p90 > 2x timedelta means the majority of entities have gaps exceeding
+        # the prediction window, so a single eval timestamp will likely land in
+        # a dead period → empty eval tables → -inf metrics.
+        events_broadly_sparse = inter_event_gap_p90 > timedelta_days * 2
+        recommended_num_eval_timestamps = 40 if events_broadly_sparse else 1
+
         return {
             "status": "success",
             # Top-level recommendation (backward compat)
@@ -612,6 +621,8 @@ def analyze_task_structure(
             "lookback_window": top_lookback,
             "pattern_description": pattern_descriptions.get(top_pattern, ""),
             "reasoning": top_candidate.get("reason", ""),
+            # num_eval_timestamps recommendation (1 = omit, 40 = set explicitly)
+            "recommended_num_eval_timestamps": recommended_num_eval_timestamps,
             # Rich analysis sections
             "entity_source": entity_source,
             "temporal": temporal,

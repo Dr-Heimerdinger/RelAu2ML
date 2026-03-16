@@ -71,6 +71,25 @@ def export_tables_to_csv(
     from sqlalchemy import create_engine, inspect
     import os
     
+    # Extract and log database name for validation
+    import re
+    db_name_match = re.search(r'/([^/]+?)(?:\?|$)', db_connection_string)
+    db_name = db_name_match.group(1) if db_name_match else "unknown"
+
+    # Log which database we're exporting from
+    print(f"[EDA Agent] Exporting tables from database: {db_name}")
+    print(f"[EDA Agent] Connection string: {db_connection_string[:50]}")
+
+    # Create a metadata file to track which database was exported
+    metadata_file = os.path.join(output_dir, "_export_metadata.json")
+    import json
+    metadata = {
+        "database_name": db_name,
+        "connection_string": db_connection_string,
+        "export_timestamp": pd.Timestamp.now().isoformat(),
+        "tables_exported": []
+    }
+
     os.makedirs(output_dir, exist_ok=True)
     
     try:
@@ -92,7 +111,6 @@ def export_tables_to_csv(
                     "table": table,
                     "path": file_path,
                     "rows": len(df),
-                    "columns": len(df.columns)
                 })
             except Exception as e:
                 errors.append({"table": table, "error": str(e)})
@@ -173,4 +191,8 @@ def extract_schema_metadata(db_connection_string: str) -> Dict[str, Any]:
             "temporal_columns": temporal_columns
         }
     except Exception as e:
+        # Save metadata file
+        with open(metadata_file, 'w') as f:
+            json.dump(metadata, f, indent=2)
+
         return {"status": "error", "error": str(e)}

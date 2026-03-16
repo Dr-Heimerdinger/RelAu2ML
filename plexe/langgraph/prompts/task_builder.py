@@ -743,10 +743,11 @@ All metrics come from `plexe.relbench.metrics`.
 Choose based on event frequency. Use 4-7 days for daily events, 30 days for weekly/biweekly events, 60-90 days for monthly events, 365 days for annual or rare events. Always follow the user's specification if given. The gap between `val_timestamp` and `test_timestamp` in the dataset MUST be >= `timedelta`.
 
 ### `num_eval_timestamps`
-Default is 1 (omit the attribute). Set to 40 when ANY of these apply:
-- Events are sparse or seasonal (e.g., motorsport races every few weeks, annual clinical trials)
-- The total data range is narrow (< 3 months). With a short data range, the default timestamp generation produces too few training frames (the framework requires > 2), causing `RuntimeError: The number of training time frames is too few`.
-- The data range divided by timedelta yields fewer than 5 possible training windows.
+**IMPORTANT**: Check the `recommended_num_eval_timestamps` field from `analyze_task_structure()` output.
+- If `recommended_num_eval_timestamps` is 40: you MUST add `num_eval_timestamps = 40` to the class. Without it, val/test splits get only 1 evaluation timestamp, which lands in a dead period for sparse/seasonal data and produces empty tables → -inf metrics.
+- If `recommended_num_eval_timestamps` is 1 (or absent): omit the attribute (default is 1).
+
+The recommendation is based on `max_gap_exceeds_timedelta` — True when inter-event gaps are large relative to the prediction window (e.g., motorsport races, annual trials, seasonal events).
 
 For daily or weekly transaction data with a wide data range (> 6 months), omit this attribute entirely.
 
@@ -785,7 +786,7 @@ Must EXACTLY match the table key used in `db.table_dict`. This is the CSV filena
 10. **CAST on already-parsed columns**: If the dataset.py already parses a column with `pd.to_datetime()`, do NOT add `CAST(col AS TIMESTAMP)` in SQL. The column is already a timestamp. Extra CAST can produce NaT values and crash the pipeline.
 11. **Binary vs Regression confusion**: "Whether X will happen", "will X do more than N", "predict if", COUNT > threshold, any yes/no outcome = `BINARY_CLASSIFICATION`. Only pure numeric outputs (sum, average, count-as-number, rate) = `REGRESSION`. When in doubt, check the user's stated metric: AUC/F1/accuracy = binary, MAE/RMSE/R2 = regression.
 12. **Table name casing**: `entity_table` must match the key in `db.table_dict` exactly. If the dataset uses `"UserInfo"` as the table key, you must write `entity_table = "UserInfo"`, not `"userinfo"`.
-13. **Too few training frames**: If the total data range is narrow (< 3 months) or data_range / timedelta < 5, you MUST set `num_eval_timestamps = 40`. Without it, the framework generates too few training timestamps and crashes with `RuntimeError: The number of training time frames is too few`.
+13. **Empty eval tables / -inf metrics**: Always check `recommended_num_eval_timestamps` from `analyze_task_structure()`. If it says 40, you MUST set `num_eval_timestamps = 40`. Without it, sparse/seasonal data produces empty val/test tables → 0 predictions → -inf metrics. This is the #1 cause of silent training failures.
 14. **Missing categorical filters**: When entity or event tables have low-cardinality "type" columns (PostTypeId, VoteTypeId, StatusId, outcome_type), failing to filter by the relevant type produces a training table with mixed entity/event subtypes and inflated row counts. Always check `schema_hints.categorical_columns` from `analyze_task_structure()` and add WHERE filters for the task-relevant values. Also check `schema_hints.sentinel_warnings` for entity ID sentinel values (-1, NULL) that should be excluded.
 
 ---

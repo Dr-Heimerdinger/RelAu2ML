@@ -26,8 +26,17 @@ Common training script errors and their fixes:
   → Add `max(count, 1)` guard
 - Import errors
   → Fix import paths, ensure modules are on PYTHONPATH
+- NameError: name 'pd' is not defined
+  → Add `import pandas as pd` at the top of the script
+- MulticategoricalTensorMapper error with datetime.time
+  → Convert time columns to strings: `df["time_col"] = df["time_col"].astype(str)`
+  → Or drop the problematic column: `del col_to_stype_dict["table_name"]["time_col"]`
 
 ## Key API Reference (DO NOT hallucinate methods not listed here)
+
+Required imports for column type overrides:
+  from torch_frame import stype  # Import stype enum for column type specifications
+  # Note: torch_frame may not be installed in all environments. Only import if needed for debugging.
 
 Database class:
   - db.table_dict: Dict[str, Table]  (table_name -> Table object)
@@ -42,14 +51,17 @@ Table class:
 get_stype_proposal(db) -> Dict[str, Dict[str, stype]]:
   - Returns nested dict: {table_name: {col_name: stype, ...}, ...}
   - May misclassify time-like strings (e.g., "00:00:00") as categorical
+  - CANNOT handle datetime.time objects - convert these to strings first
 
 make_pkey_fkey_graph(db, col_to_stype_dict, text_embedder_cfg, cache_dir):
   - col_to_stype_dict must be Dict[str, Dict[str, stype]] (same structure as get_stype_proposal output)
   - Returns: (HeteroData, col_stats_dict)
+  - MulticategoricalTensorMapper error means non-string/list data (e.g., datetime.time objects)
 
 To access column data: db.table_dict["table_name"].df["column_name"]
-To override stype:     col_to_stype_dict["table_name"]["col"] = stype.numerical
+To override stype:     col_to_stype_dict["table_name"]["col"] = stype.numerical  # Requires: from torch_frame import stype
 To drop a column:      del col_to_stype_dict["table_name"]["col"]
+To fix datetime.time: db.table_dict["table_name"].df["col"] = db.table_dict["table_name"].df["col"].astype(str)
 
 CRITICAL RULES:
 - Output the COMPLETE fixed script inside ```python ... ``` code block
