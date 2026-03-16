@@ -130,8 +130,15 @@ class GenDataset(Dataset):
 
 KEY RULES & BEST PRACTICES:
 
+0. **Column Verification (CRITICAL)**:
+   - ONLY apply pd.to_numeric() to columns that ACTUALLY EXIST in each specific table.
+   - Cross-reference column names from get_csv_files_info() output. Do NOT assume a column
+     from one table exists in another table with a similar name.
+   - Example: if "ci_percent" exists in "outcome_analyses" but NOT in "outcomes",
+     do NOT write `outcomes["ci_percent"]` — that will crash with KeyError.
+
 1. **Temporal Handling**:
-   - Use pd.to_datetime() with errors='coerce' for date parsing
+   - ALWAYS use pd.to_datetime(col, format='mixed', errors='coerce') for date parsing — never omit format='mixed'
    - For tables without time columns, merge timestamps from related tables (e.g., results get date from races)
    - Some events happen BEFORE the main event (e.g., qualifying before race): subtract time if needed
    - Format: pd.Timestamp("YYYY-MM-DD") for val_timestamp and test_timestamp
@@ -168,6 +175,15 @@ KEY RULES & BEST PRACTICES:
    - Table names in tables dict MUST exactly match CSV filenames (without .csv extension), preserving original case
    - Example: if the CSV is "UserInfo.csv", the table key must be "UserInfo", NOT "userinfo"
    - Example: if the CSV is "searchinfo.csv", the table key must be "searchinfo"
+
+7. **Primary Key Rules (CRITICAL)**:
+   - ONLY set pkey_col for columns that the DATABASE SCHEMA lists as PRIMARY KEY
+   - Stream/event/fact tables (e.g., searchstream, visitstream, phonerequestsstream)
+     typically have NO primary key — use pkey_col=None
+   - A column CANNOT be both pkey_col AND in fkey_col_to_pkey_table simultaneously
+     (e.g., if SearchID references searchinfo, it is a FOREIGN KEY, not a primary key)
+   - If the schema_info from EDA shows no primary key for a table, use pkey_col=None
+   - When in doubt, use pkey_col=None — it is always safe
 
 FINAL OUTPUT: Complete Python code saved to dataset.py via register_dataset_code() tool call.
 

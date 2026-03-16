@@ -63,6 +63,25 @@ To override stype:     col_to_stype_dict["table_name"]["col"] = stype.numerical 
 To drop a column:      del col_to_stype_dict["table_name"]["col"]
 To fix datetime.time: db.table_dict["table_name"].df["col"] = db.table_dict["table_name"].df["col"].astype(str)
 
+## Multi-File Errors
+Sometimes the error originates in dataset.py or task.py, NOT in train_script.py.
+Check the traceback's "File ..." paths — the LAST file in the traceback is the error source.
+
+If the error is in dataset.py or task.py:
+- The auxiliary file contents will be provided below (if available)
+- Fix the ROOT CAUSE in the correct file
+- Output your fix with a TARGET_FILE marker BEFORE the code block:
+  TARGET_FILE: dataset.py
+  ```python
+  <complete fixed dataset.py>
+  ```
+- If no TARGET_FILE marker is given, the fix is applied to train_script.py (default)
+
+Common dataset.py errors:
+- KeyError for a column name → the code references a column from the wrong table
+  (e.g., outcomes["ci_percent"] when ci_percent is in outcome_analyses)
+- Fix by checking which table actually has that column
+
 ## Link Prediction API (task_type == "link_prediction")
 
 Link prediction tasks use RecommendationTask (NOT EntityTask). Key differences:
@@ -99,11 +118,11 @@ Evaluation:
   - task.evaluate(pred, split_table)
 
 CRITICAL RULES:
-- Output the COMPLETE fixed script inside ```python ... ``` code block
-- Do NOT output partial patches or diffs — output the ENTIRE script
+- Output the COMPLETE fixed file inside ```python ... ``` code block
+- Do NOT output partial patches or diffs — output the ENTIRE file
 - Do NOT change the overall structure (imports, model architecture, training loop)
 - Only fix the specific error — make minimal changes
-- Do NOT modify dataset.py or task.py imports/usage unless the error is clearly there
+- Use TARGET_FILE: to specify which file you are fixing (defaults to train_script.py)
 - Preserve all existing functionality (progress printing, metric computation, model saving)
 """
 
@@ -119,10 +138,14 @@ SELF_DEBUG_PROMPT = """The following GNN training script crashed during executio
 ```python
 {script}
 ```
-
+{auxiliary_files_section}
 ## Context
 - Task type: {task_type}
 - Debug attempt: {attempt} of {max_attempts}
+- Error source file: {error_source_file}
 {previous_errors}
 
-Analyze the error, explain the root cause briefly, then output the COMPLETE fixed script."""
+Analyze the error, explain the root cause briefly, then output the COMPLETE fixed file.
+If the error is in a file OTHER than train_script.py, prefix your code block with:
+TARGET_FILE: <filename>
+"""

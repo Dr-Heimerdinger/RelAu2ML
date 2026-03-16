@@ -51,6 +51,48 @@ class OperationAgent:
         self.emitter = emitter
 
     # ------------------------------------------------------------------
+    # Multi-file error source detection
+    # ------------------------------------------------------------------
+    @staticmethod
+    def _identify_error_source(error: str, working_dir: str) -> Dict[str, str]:
+        """Parse traceback to find which file the error originates in.
+
+        Returns {"source_file": "dataset.py"|"task.py"|"train_script.py"}.
+        """
+        # Find all File "..." references within the working directory
+        pattern = re.compile(r'File "([^"]+)"')
+        matches = pattern.findall(error)
+
+        # Filter to files inside working_dir
+        wd = os.path.abspath(working_dir)
+        local_files = [m for m in matches if os.path.abspath(m).startswith(wd)]
+
+        if local_files:
+            last_file = os.path.basename(local_files[-1])
+            if last_file in ("dataset.py", "task.py", "train_script.py"):
+                return {"source_file": last_file}
+
+        return {"source_file": "train_script.py"}
+
+    @staticmethod
+    def _extract_fix(text: str) -> tuple:
+        """Extract TARGET_FILE marker and code block from LLM response.
+
+        Returns (target_filename, fixed_code) or (None, None).
+        """
+        # Look for TARGET_FILE: <filename> before the code block
+        target_match = re.search(r"TARGET_FILE:\s*(\S+)", text)
+        target_file = target_match.group(1) if target_match else "train_script.py"
+
+        # Extract code block
+        code_match = re.search(r"```python\s*\n(.*?)```", text, re.DOTALL)
+        if not code_match:
+            code_match = re.search(r"```\s*\n(.*?)```", text, re.DOTALL)
+        if code_match:
+            return target_file, code_match.group(1).strip()
+        return None, None
+
+    # ------------------------------------------------------------------
     # Main entry point
     # ------------------------------------------------------------------
     def invoke(self, state: PipelineState) -> Dict[str, Any]:
@@ -83,15 +125,21 @@ class OperationAgent:
         error_msg = self._extract_error(exec_result, exec_result.get("status", "error"))
         previous_errors = []
 
-        # Cache the original script BEFORE entering the debug loop.
+        # Cache ALL project files BEFORE entering the debug loop.
         # Each debug iteration fixes the ORIGINAL, not the previous broken patch,
-        # to prevent error compounding (e.g. LLM introduces db.get_column() which
-        # doesn't exist, and all subsequent iterations inherit that bug).
-        try:
-            with open(script_path) as f:
-                original_script = f.read()
-        except Exception as e:
-            return self._finalize_failure(f"Cannot read script: {e}", state)
+        # to prevent error compounding.
+        original_files = {}  # filename -> content
+        for fname in ("train_script.py", "dataset.py", "task.py"):
+            fpath = os.path.join(working_dir, fname)
+            if os.path.exists(fpath):
+                try:
+                    with open(fpath) as f:
+                        original_files[fname] = f.read()
+                except Exception:
+                    pass
+
+        if "train_script.py" not in original_files:
+            return self._finalize_failure(f"Cannot read script: {script_path}", state)
 
         for attempt in range(1, self.MAX_DEBUG_ITERATIONS + 1):
             logger.info(f"Self-debug attempt {attempt}/{self.MAX_DEBUG_ITERATIONS}")
@@ -101,25 +149,62 @@ class OperationAgent:
                     f"Debug attempt {attempt}/{self.MAX_DEBUG_ITERATIONS}: analyzing error and patching script",
                 )
 
-            # Always debug from the original script to prevent error compounding
-            current_script = original_script
+            # Restore ALL files to originals before each attempt
+            for fname, content in original_files.items():
+                fpath = os.path.join(working_dir, fname)
+                try:
+                    with open(fpath, "w") as f:
+                        f.write(content)
+                except Exception:
+                    pass
+
+            # Identify which file the error originates in
+            error_source = self._identify_error_source(error_msg, working_dir)
+            source_file = error_source["source_file"]
+
+            # Build auxiliary file content for the debug prompt
+            auxiliary_content = {}
+            if source_file != "train_script.py":
+                if source_file in original_files:
+                    auxiliary_content[source_file] = original_files[source_file]
+            # Also include dataset.py/task.py if they exist and aren't the main script
+            for aux_name in ("dataset.py", "task.py"):
+                if aux_name != "train_script.py" and aux_name in original_files and aux_name not in auxiliary_content:
+                    auxiliary_content[aux_name] = original_files[aux_name]
 
             # Ask LLM to fix
-            fixed_script = self._llm_debug(
-                current_script, error_msg, state, attempt, previous_errors
+            fixed_text = self._llm_debug(
+                original_files["train_script.py"],
+                error_msg,
+                state,
+                attempt,
+                previous_errors,
+                error_source=error_source,
+                auxiliary_files=auxiliary_content,
             )
 
-            if fixed_script is None:
+            if fixed_text is None:
                 logger.warning("LLM could not produce a fix, stopping debug loop")
                 break
 
-            # Write patched script
+            # Extract target file and fixed code from LLM response
+            target_file, fixed_code = self._extract_fix(fixed_text)
+            if fixed_code is None:
+                logger.warning("Could not extract code block from LLM response")
+                break
+
+            # Validate target file
+            if target_file not in ("train_script.py", "dataset.py", "task.py"):
+                target_file = "train_script.py"
+
+            # Write patched file
+            target_path = os.path.join(working_dir, target_file)
             try:
-                with open(script_path, "w") as f:
-                    f.write(fixed_script)
-                logger.info(f"Patched script written to {script_path}")
+                with open(target_path, "w") as f:
+                    f.write(fixed_code)
+                logger.info(f"Patched {target_file} written to {target_path}")
             except Exception as e:
-                return self._finalize_failure(f"Cannot write patched script: {e}", state)
+                return self._finalize_failure(f"Cannot write patched {target_file}: {e}", state)
 
             # Re-execute
             exec_result = self._execute(script_path)
@@ -127,7 +212,7 @@ class OperationAgent:
                 if self.emitter:
                     self.emitter.emit_thought(
                         self.name,
-                        f"Training succeeded after debug attempt {attempt}!",
+                        f"Training succeeded after debug attempt {attempt} (fixed {target_file})!",
                     )
                 return self._finalize_success(exec_result, state)
 
@@ -137,13 +222,15 @@ class OperationAgent:
                 exec_result, exec_result.get("status", "error")
             )
 
-        # All attempts exhausted — restore original script on disk so that
+        # All attempts exhausted — restore all original files on disk so that
         # orchestrator-level retry (via error_handler → gnn_training) starts clean.
-        try:
-            with open(script_path, "w") as f:
-                f.write(original_script)
-        except Exception:
-            pass  # best-effort restore
+        for fname, content in original_files.items():
+            fpath = os.path.join(working_dir, fname)
+            try:
+                with open(fpath, "w") as f:
+                    f.write(content)
+            except Exception:
+                pass  # best-effort restore
 
         all_errors = previous_errors + [error_msg]
         exhaustion_msg = (
@@ -198,11 +285,16 @@ class OperationAgent:
         state: PipelineState,
         attempt: int,
         previous_errors: list,
+        error_source: Optional[Dict[str, str]] = None,
+        auxiliary_files: Optional[Dict[str, str]] = None,
     ) -> Optional[str]:
         """Invoke LLM to analyze error and produce a fixed script.
 
         Follows the Self-Debugging approach (Chen et al., ICLR 2024):
         feed traceback + code → LLM explains error → outputs complete fixed script.
+
+        Returns the RAW LLM response text (including TARGET_FILE marker) so the
+        caller can use _extract_fix() to determine which file to patch.
         """
         from langchain_core.messages import SystemMessage, HumanMessage
         from plexe.langgraph.config import get_llm_from_model_id
@@ -228,6 +320,17 @@ class OperationAgent:
         task_info = state.get("task_info") or {}
         task_type = task_info.get("task_type", "unknown") if isinstance(task_info, dict) else "unknown"
 
+        # Build auxiliary files section for multi-file debugging
+        auxiliary_section = ""
+        if auxiliary_files:
+            for fname, content in auxiliary_files.items():
+                auxiliary_section += f"\n\n## Auxiliary File: {fname}\n```python\n{content}\n```"
+            auxiliary_section = "\n" + auxiliary_section
+
+        error_source_file = "train_script.py"
+        if error_source:
+            error_source_file = error_source.get("source_file", "train_script.py")
+
         prompt = SELF_DEBUG_PROMPT.format(
             script=script,
             error=error,
@@ -236,6 +339,8 @@ class OperationAgent:
             attempt=attempt,
             max_attempts=self.MAX_DEBUG_ITERATIONS,
             previous_errors=prev_ctx,
+            auxiliary_files_section=auxiliary_section,
+            error_source_file=error_source_file,
         )
 
         try:
@@ -258,24 +363,12 @@ class OperationAgent:
                         self.token_tracker.summary(),
                     )
 
-            return self._extract_code_block(response.content)
+            # Return raw text so caller can use _extract_fix() for TARGET_FILE parsing
+            return response.content
 
         except Exception as e:
             logger.error(f"LLM debug call failed: {e}")
             return None
-
-    @staticmethod
-    def _extract_code_block(text: str) -> Optional[str]:
-        """Extract Python code from markdown code block in LLM response."""
-        # Try ```python ... ``` first
-        match = re.search(r"```python\s*\n(.*?)```", text, re.DOTALL)
-        if match:
-            return match.group(1).strip()
-        # Fallback: ``` ... ```
-        match = re.search(r"```\s*\n(.*?)```", text, re.DOTALL)
-        if match:
-            return match.group(1).strip()
-        return None
 
     # ------------------------------------------------------------------
     # Error extraction
