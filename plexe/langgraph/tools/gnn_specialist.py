@@ -67,8 +67,25 @@ def generate_training_script(
         csv_dir = f"{working_dir}/csv_files"
     else:
         csv_dir = os.path.abspath(csv_dir)
-    
-    script_template = f'''"""
+
+    if task_type == "link_prediction":
+        script_template = _build_link_prediction_template(
+            dataset_module_path=dataset_module_path,
+            dataset_class_name=dataset_class_name,
+            task_module_path=task_module_path,
+            task_class_name=task_class_name,
+            working_dir=working_dir,
+            csv_dir=csv_dir,
+            tune_metric=tune_metric,
+            higher_is_better=higher_is_better,
+            epochs=epochs,
+            batch_size=batch_size,
+            learning_rate=learning_rate,
+            hidden_channels=hidden_channels,
+            num_gnn_layers=num_gnn_layers,
+        )
+    else:
+        script_template = f'''"""
 Auto-generated GNN training script using plexe.relbench.modeling.
 Faithfully follows the reference RelBench training notebook.
 """
@@ -903,4 +920,482 @@ def _patch_broken_imports(script_path: str, script_dir: str):
                 f.write(patched)
     except Exception:
         pass
+
+
+def _build_link_prediction_template(
+    dataset_module_path: str,
+    dataset_class_name: str,
+    task_module_path: str,
+    task_class_name: str,
+    working_dir: str,
+    csv_dir: str,
+    tune_metric: str,
+    higher_is_better: bool,
+    epochs: int,
+    batch_size: int,
+    learning_rate: float,
+    hidden_channels: int,
+    num_gnn_layers: int,
+) -> str:
+    """Build the training script template for link prediction tasks.
+
+    Link prediction uses a fundamentally different pipeline from node prediction:
+    - get_link_train_table_input / LinkNeighborLoader for training
+    - Dot-product scoring with BCEWithLogitsLoss
+    - Top-k evaluation against all destination node embeddings
+    """
+    import os
+
+    return f'''"""
+Auto-generated GNN link prediction training script using plexe.relbench.modeling.
+"""
+
+import os
+import sys
+import copy
+import math
+import json
+import numpy as np
+from tqdm import tqdm
+
+import torch
+import signal
+import time
+
+sys.path.insert(0, "{os.path.dirname(dataset_module_path)}")
+sys.path.insert(0, "{os.path.dirname(task_module_path)}")
+
+from dataset import {dataset_class_name}
+from task import {task_class_name}
+
+from plexe.relbench.modeling.graph import make_pkey_fkey_graph, get_link_train_table_input
+from plexe.relbench.modeling.loader import LinkNeighborLoader
+from plexe.relbench.modeling.nn import HeteroEncoder, HeteroTemporalEncoder, HeteroGraphSAGE
+from plexe.relbench.modeling.utils import get_stype_proposal, to_unix_time
+from torch_geometric.loader import NeighborLoader
+from torch_geometric.nn import MLP
+
+device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+print(f"Using device: {{device}}")
+
+# --- Timeout wrapper for task table generation ---
+def timeout_handler(signum, frame):
+    raise TimeoutError("Task table generation exceeded 90 minutes")
+
+def get_table_with_timeout(task, split, timeout_seconds=5400):
+    signal.signal(signal.SIGALRM, timeout_handler)
+    signal.alarm(timeout_seconds)
+    try:
+        start_time = time.time()
+        print(f"Generating {{split}} table (timeout: {{timeout_seconds//60}} minutes)...")
+        table = task.get_table(split)
+        elapsed = time.time() - start_time
+        print(f"{{split}} table generated in {{elapsed:.1f}} seconds")
+        return table
+    except TimeoutError as e:
+        print(f"ERROR: {{e}}")
+        raise
+    finally:
+        signal.alarm(0)
+
+# --- Text Embedding (GloVe, with fallback to None) ---
+text_embedder_cfg = None
+try:
+    from typing import List, Optional as Opt
+    from sentence_transformers import SentenceTransformer
+    from torch import Tensor
+    from torch_frame.config.text_embedder import TextEmbedderConfig
+
+    class GloveTextEmbedding:
+        def __init__(self, device: Opt[torch.device] = None):
+            self.model = SentenceTransformer(
+                "sentence-transformers/average_word_embeddings_glove.6B.300d",
+                device=device,
+            )
+        def __call__(self, sentences: List[str]) -> Tensor:
+            return torch.from_numpy(self.model.encode(sentences))
+
+    text_embedder_cfg = TextEmbedderConfig(
+        text_embedder=GloveTextEmbedding(device=device), batch_size=256
+    )
+    print("Using GloVe text embeddings")
+except Exception as e:
+    print(f"Text embedding not available ({{e}}), using None")
+
+# --- Dataset & Task ---
+csv_dir = "{csv_dir}"
+dataset = {dataset_class_name}(csv_dir=csv_dir)
+task = {task_class_name}(dataset)
+db = dataset.get_db()
+
+train_table = get_table_with_timeout(task, "train")
+val_table = get_table_with_timeout(task, "val")
+test_table = get_table_with_timeout(task, "test")
+
+print(f"Train samples: {{len(train_table)}}")
+print(f"Val samples: {{len(val_table)}}")
+print(f"Test samples: {{len(test_table)}}")
+
+# --- Build Graph ---
+col_to_stype_dict = get_stype_proposal(db)
+
+if text_embedder_cfg is None:
+    from torch_frame import stype
+    for table_name in col_to_stype_dict:
+        for col_name in list(col_to_stype_dict[table_name].keys()):
+            if col_to_stype_dict[table_name][col_name] == stype.text_embedded:
+                print(f"  Converting {{table_name}}.{{col_name}} from text to categorical (no embedder)")
+                col_to_stype_dict[table_name][col_name] = stype.categorical
+
+data, col_stats_dict = make_pkey_fkey_graph(
+    db,
+    col_to_stype_dict=col_to_stype_dict,
+    text_embedder_cfg=text_embedder_cfg,
+    cache_dir="{working_dir}/cache/",
+)
+
+# --- Link prediction config ---
+src_entity_table = task.src_entity_table
+dst_entity_table = task.dst_entity_table
+eval_k = task.eval_k
+num_dst_nodes = task.num_dst_nodes
+num_neighbors = [128] * {num_gnn_layers}
+
+# --- Train data loader ---
+train_table_input = get_link_train_table_input(train_table, task)
+train_loader = LinkNeighborLoader(
+    data,
+    num_neighbors=num_neighbors,
+    src_nodes=train_table_input.src_nodes,
+    dst_nodes=train_table_input.dst_nodes,
+    num_dst_nodes=train_table_input.num_dst_nodes,
+    src_time=train_table_input.src_time,
+    time_attr="time",
+    temporal_strategy="uniform",
+    batch_size={batch_size},
+    shuffle=True,
+    num_workers=0,
+)
+
+# --- Model ---
+class Model(torch.nn.Module):
+    def __init__(self, data, col_stats_dict, num_layers, channels, out_channels):
+        super().__init__()
+        self.encoder = HeteroEncoder(
+            channels=channels,
+            node_to_col_names_dict={{
+                node_type: data[node_type].tf.col_names_dict
+                for node_type in data.node_types
+            }},
+            node_to_col_stats=col_stats_dict,
+        )
+        self.temporal_encoder = HeteroTemporalEncoder(
+            node_types=[
+                node_type for node_type in data.node_types if "time" in data[node_type]
+            ],
+            channels=channels,
+        )
+        self.gnn = HeteroGraphSAGE(
+            node_types=data.node_types,
+            edge_types=data.edge_types,
+            channels=channels,
+            aggr="sum",
+            num_layers=num_layers,
+        )
+        self.head = MLP(
+            channels,
+            out_channels=out_channels,
+            norm="batch_norm",
+            num_layers=1,
+        )
+        self.reset_parameters()
+
+    def reset_parameters(self):
+        self.encoder.reset_parameters()
+        self.temporal_encoder.reset_parameters()
+        self.gnn.reset_parameters()
+        self.head.reset_parameters()
+
+    def forward(self, batch, entity_table):
+        seed_time = batch[entity_table].seed_time
+        x_dict = self.encoder(batch.tf_dict)
+
+        rel_time_dict = self.temporal_encoder(
+            seed_time, batch.time_dict, batch.batch_dict
+        )
+
+        for node_type, rel_time in rel_time_dict.items():
+            x_dict[node_type] = x_dict[node_type] + rel_time
+
+        x_dict = self.gnn(
+            x_dict,
+            batch.edge_index_dict,
+            batch.num_sampled_nodes_dict,
+            batch.num_sampled_edges_dict,
+        )
+
+        return self.head(x_dict[entity_table][:seed_time.size(0)])
+
+model = Model(
+    data=data,
+    col_stats_dict=col_stats_dict,
+    num_layers={num_gnn_layers},
+    channels={hidden_channels},
+    out_channels={hidden_channels},
+).to(device)
+
+optimizer = torch.optim.Adam(model.parameters(), lr={learning_rate})
+loss_fn = torch.nn.BCEWithLogitsLoss()
+
+# --- Metric config ---
+tune_metric = "{tune_metric}"
+higher_is_better = {higher_is_better}
+
+def _get_metric(metrics_dict, metric_name):
+    """Get metric value with alias fallback."""
+    if metric_name in metrics_dict:
+        v = metrics_dict[metric_name]
+        if v is not None and not (isinstance(v, float) and math.isnan(v)):
+            return v
+    aliases = {{
+        "link_prediction_map": "link_prediction_precision",
+        "link_prediction_precision": "link_prediction_map",
+        "map": "link_prediction_map",
+        "average_precision": "link_prediction_map",
+    }}
+    alt = aliases.get(metric_name)
+    if alt and alt in metrics_dict:
+        v = metrics_dict[alt]
+        if v is not None and not (isinstance(v, float) and math.isnan(v)):
+            print(f"  Note: '{{metric_name}}' not found, using '{{alt}}' instead")
+            return v
+    return None
+
+def evaluate_link_prediction(model, data, split_table, task):
+    """Evaluate link prediction: compute src/dst embeddings, score, take top-k."""
+    model.eval()
+    eval_k_local = task.eval_k
+    num_dst = task.num_dst_nodes
+
+    if len(split_table) == 0:
+        print("  Warning: empty split table, skipping evaluation")
+        return {{}}
+
+    eval_time_np = to_unix_time(split_table.df[split_table.time_col].iloc[:1])
+    eval_seed_time = int(eval_time_np[0])
+
+    # Step 1: compute embeddings for ALL destination nodes
+    dst_loader = NeighborLoader(
+        data,
+        num_neighbors=num_neighbors,
+        time_attr="time",
+        input_nodes=(dst_entity_table, torch.arange(num_dst)),
+        input_time=torch.full((num_dst,), eval_seed_time),
+        batch_size={batch_size},
+        temporal_strategy="uniform",
+        shuffle=False,
+        num_workers=0,
+        persistent_workers=False,
+    )
+    dst_embs = []
+    with torch.no_grad():
+        for batch in tqdm(dst_loader, desc="Dst embeddings", leave=False):
+            batch = batch.to(device)
+            emb = model(batch, dst_entity_table)
+            dst_embs.append(emb.cpu())
+    all_dst_emb = torch.cat(dst_embs, dim=0)
+
+    # Step 2: compute embeddings for source nodes in the split table
+    src_nodes = torch.from_numpy(
+        split_table.df[task.src_entity_col].astype(int).values
+    )
+    src_time = torch.from_numpy(
+        to_unix_time(split_table.df[split_table.time_col])
+    )
+    src_loader = NeighborLoader(
+        data,
+        num_neighbors=num_neighbors,
+        time_attr="time",
+        input_nodes=(src_entity_table, src_nodes),
+        input_time=src_time,
+        batch_size={batch_size},
+        temporal_strategy="uniform",
+        shuffle=False,
+        num_workers=0,
+        persistent_workers=False,
+    )
+    src_embs = []
+    with torch.no_grad():
+        for batch in tqdm(src_loader, desc="Src embeddings", leave=False):
+            batch = batch.to(device)
+            emb = model(batch, src_entity_table)
+            src_embs.append(emb.cpu())
+    all_src_emb = torch.cat(src_embs, dim=0)
+
+    # Step 3: score src-dst pairs and take top-k (chunked to avoid OOM)
+    pred_indices = []
+    chunk_size = 128
+    for i in range(0, all_src_emb.size(0), chunk_size):
+        chunk = all_src_emb[i:i + chunk_size]
+        scores = chunk @ all_dst_emb.T
+        topk = scores.topk(min(eval_k_local, scores.size(1)), dim=1).indices
+        pred_indices.append(topk)
+    pred = torch.cat(pred_indices, dim=0).numpy()
+
+    if device.type == 'cuda':
+        torch.cuda.empty_cache()
+
+    return task.evaluate(pred, split_table)
+
+# --- Training loop with checkpoint saving and early stopping ---
+state_dict = None
+best_val_metric = -math.inf if higher_is_better else math.inf
+patience_counter = 0
+early_stop_patience = 5
+min_delta = 1e-6
+checkpoint_path = "{working_dir}/checkpoint.pt"
+epochs_configured = {epochs}
+
+if os.path.exists(checkpoint_path):
+    try:
+        checkpoint = torch.load(checkpoint_path, weights_only=True)
+        model.load_state_dict(checkpoint['model_state'])
+        optimizer.load_state_dict(checkpoint['optimizer_state'])
+        best_val_metric = checkpoint.get('best_val_metric', best_val_metric)
+        start_epoch = checkpoint.get('epoch', 0) + 1
+        print(f"Loaded checkpoint from epoch {{checkpoint.get('epoch', 0)}}, best {{tune_metric}}={{best_val_metric:.4f}}")
+    except Exception as e:
+        print(f"Could not load checkpoint: {{e}}, starting fresh")
+        start_epoch = 1
+else:
+    start_epoch = 1
+
+epochs_trained = start_epoch - 1
+
+for epoch in range(start_epoch, epochs_configured + 1):
+    epochs_trained = epoch
+    # Train
+    model.train()
+    loss_accum = count_accum = 0
+    for src_batch, pos_dst_batch, neg_dst_batch in tqdm(train_loader, desc=f"Epoch {{epoch}}"):
+        src_batch = src_batch.to(device)
+        pos_dst_batch = pos_dst_batch.to(device)
+        neg_dst_batch = neg_dst_batch.to(device)
+
+        optimizer.zero_grad()
+
+        src_emb = model(src_batch, src_entity_table)
+        pos_emb = model(pos_dst_batch, dst_entity_table)
+        neg_emb = model(neg_dst_batch, dst_entity_table)
+
+        pos_score = (src_emb * pos_emb).sum(dim=-1)
+        neg_score = (src_emb * neg_emb).sum(dim=-1)
+
+        pred_scores = torch.cat([pos_score, neg_score])
+        target = torch.cat([torch.ones_like(pos_score), torch.zeros_like(neg_score)])
+
+        loss = loss_fn(pred_scores, target)
+        loss.backward()
+        optimizer.step()
+
+        loss_accum += loss.detach().item() * pred_scores.size(0)
+        count_accum += pred_scores.size(0)
+
+    train_loss = loss_accum / max(count_accum, 1)
+
+    if math.isnan(train_loss) or math.isinf(train_loss):
+        print(f"Warning: NaN/Inf loss at epoch {{epoch}}, stopping early")
+        break
+
+    # Validate
+    val_metrics = evaluate_link_prediction(model, data, val_table, task)
+    print(f"Epoch {{epoch}}/{{epochs_configured}}: Loss={{train_loss:.4f}}, Val metrics: {{val_metrics}}")
+
+    current_val = _get_metric(val_metrics, tune_metric)
+    if current_val is None:
+        print(f"  Warning: metric '{{tune_metric}}' unavailable (got {{list(val_metrics.keys())}}), saving model by loss")
+        state_dict = copy.deepcopy(model.state_dict())
+        continue
+
+    improved = False
+    if higher_is_better:
+        improved = current_val > best_val_metric + min_delta
+    else:
+        improved = current_val < best_val_metric - min_delta
+
+    if improved:
+        best_val_metric = current_val
+        state_dict = copy.deepcopy(model.state_dict())
+        patience_counter = 0
+        print(f"  -> New best model! {{tune_metric}}={{best_val_metric:.4f}}")
+
+        torch.save({{
+            'epoch': epoch,
+            'model_state': model.state_dict(),
+            'optimizer_state': optimizer.state_dict(),
+            'best_val_metric': best_val_metric,
+            'tune_metric': tune_metric,
+        }}, checkpoint_path)
+        print(f"  -> Checkpoint saved to {{checkpoint_path}}")
+    else:
+        patience_counter += 1
+        print(f"  -> No improvement (patience: {{patience_counter}}/{{early_stop_patience}})")
+
+        torch.save({{
+            'epoch': epoch,
+            'model_state': model.state_dict(),
+            'optimizer_state': optimizer.state_dict(),
+            'best_val_metric': best_val_metric,
+            'tune_metric': tune_metric,
+        }}, checkpoint_path)
+
+    if patience_counter >= early_stop_patience:
+        print(f"Early stopping triggered! No improvement for {{early_stop_patience}} epochs")
+        break
+
+    if device.type == 'cuda':
+        torch.cuda.empty_cache()
+
+# --- Final Evaluation ---
+if state_dict is None:
+    print("Warning: No best model found during training, using final model state")
+    state_dict = copy.deepcopy(model.state_dict())
+model.load_state_dict(state_dict)
+
+val_metrics = evaluate_link_prediction(model, data, val_table, task)
+print(f"\\nBest Val metrics: {{val_metrics}}")
+
+test_metrics = evaluate_link_prediction(model, data, test_table, task)
+print(f"Best Test metrics: {{test_metrics}}")
+
+# --- Save model & results ---
+torch.save(state_dict, "{working_dir}/best_model.pt")
+
+if os.path.exists(checkpoint_path):
+    try:
+        os.remove(checkpoint_path)
+        print(f"Checkpoint file cleaned up")
+    except:
+        pass
+
+def _to_json_safe(d):
+    """Convert numpy/torch values to Python floats for JSON serialization."""
+    return {{k: float(v) for k, v in d.items()}}
+
+results = {{
+    "best_val_{tune_metric}": float(best_val_metric),
+    "tune_metric": tune_metric,
+    "val_metrics": _to_json_safe(val_metrics),
+    "test_metrics": _to_json_safe(test_metrics),
+    "model_path": "{working_dir}/best_model.pt",
+    "epochs_trained": int(epochs_trained),
+    "epochs_configured": int(epochs_configured),
+}}
+
+with open("{working_dir}/training_results.json", "w") as f:
+    json.dump(results, f, indent=2)
+
+print(f"Epochs trained: {{epochs_trained}}/{{epochs_configured}}")
+print(f"\\nTraining complete! Results saved to {working_dir}/training_results.json")
+'''
 

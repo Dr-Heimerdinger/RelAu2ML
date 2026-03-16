@@ -158,6 +158,7 @@ class ConversationalAgent(BaseAgent):
         link_prediction_keywords = [
             "recommend", "which items", "list of", "purchase list",
             "map@", "precision@", "recall@", "link prediction",
+            "mean average precision",
         ]
         regression_keywords = [
             "sum", "total", "sales", "revenue", "amount", "count",
@@ -189,6 +190,7 @@ class ConversationalAgent(BaseAgent):
                 ("mae", "MAE"), ("rmse", "RMSE"),
                 ("r2", "R2"), ("r²", "R2"),
                 ("auc", "AUC"),
+                ("mean average precision", "MAP"),
                 ("precision@", "precision@k"), ("recall@", "recall@k"),
                 ("map@", "MAP@k"),
             ]

@@ -63,6 +63,41 @@ To override stype:     col_to_stype_dict["table_name"]["col"] = stype.numerical 
 To drop a column:      del col_to_stype_dict["table_name"]["col"]
 To fix datetime.time: db.table_dict["table_name"].df["col"] = db.table_dict["table_name"].df["col"].astype(str)
 
+## Link Prediction API (task_type == "link_prediction")
+
+Link prediction tasks use RecommendationTask (NOT EntityTask). Key differences:
+
+Task attributes:
+  - task.src_entity_table, task.dst_entity_table  (NOT task.entity_table)
+  - task.src_entity_col, task.dst_entity_col      (NOT task.entity_col)
+  - task.eval_k: int                               (top-k for evaluation)
+  - task.num_dst_nodes: int                         (total destination nodes)
+
+Data loading:
+  from plexe.relbench.modeling.graph import get_link_train_table_input  # NOT get_node_train_table_input
+  from plexe.relbench.modeling.loader import LinkNeighborLoader
+  table_input = get_link_train_table_input(table, task)
+  # table_input has: .src_nodes, .dst_nodes, .num_dst_nodes, .src_time
+  train_loader = LinkNeighborLoader(data, num_neighbors=..., src_nodes=table_input.src_nodes,
+      dst_nodes=table_input.dst_nodes, num_dst_nodes=table_input.num_dst_nodes,
+      src_time=table_input.src_time, time_attr="time", batch_size=..., shuffle=True, num_workers=0)
+  # Each batch yields: (src_batch, pos_dst_batch, neg_dst_batch) — 3 HeteroData objects
+
+Training:
+  src_emb = model(src_batch, src_entity_table)
+  pos_emb = model(pos_dst_batch, dst_entity_table)
+  neg_emb = model(neg_dst_batch, dst_entity_table)
+  pos_score = (src_emb * pos_emb).sum(dim=-1)
+  neg_score = (src_emb * neg_emb).sum(dim=-1)
+  loss = BCEWithLogitsLoss(cat([pos_score, neg_score]), cat([ones, zeros]))
+
+Evaluation:
+  - Compute embeddings for ALL dst nodes using NeighborLoader
+  - Compute embeddings for split src nodes using NeighborLoader
+  - Score = src_emb @ dst_emb.T, take .topk(eval_k)
+  - pred.shape must be (num_src, eval_k) of dst node indices
+  - task.evaluate(pred, split_table)
+
 CRITICAL RULES:
 - Output the COMPLETE fixed script inside ```python ... ``` code block
 - Do NOT output partial patches or diffs — output the ENTIRE script

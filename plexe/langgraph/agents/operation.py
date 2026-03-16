@@ -459,6 +459,9 @@ class OperationAgent:
         if task_info and isinstance(task_info, dict):
             task_type = task_info.get("task_type", "regression")
 
+        if task_type == "link_prediction":
+            return self._generate_link_inference_code(working_dir)
+
         inference_code = f'''"""
 Auto-generated inference code for the trained GNN model.
 """
@@ -544,3 +547,151 @@ if __name__ == "__main__":
 '''
 
         return inference_code
+
+    def _generate_link_inference_code(self, working_dir: str) -> str:
+        """Generate inference code for link prediction models."""
+        return f'''"""
+Auto-generated inference code for a trained GNN link prediction model.
+"""
+
+import torch
+import numpy as np
+import sys
+import os
+from tqdm import tqdm
+
+sys.path.insert(0, "{working_dir}")
+
+from dataset import GenDataset
+from task import GenTask
+
+def load_model_and_predict(model_path: str, split: str = "test"):
+    """Load the trained link prediction model and generate top-k predictions."""
+    from plexe.relbench.modeling.nn import HeteroEncoder, HeteroTemporalEncoder, HeteroGraphSAGE
+    from plexe.relbench.modeling.graph import make_pkey_fkey_graph
+    from plexe.relbench.modeling.utils import get_stype_proposal, to_unix_time
+    from torch_geometric.loader import NeighborLoader
+    from torch_geometric.nn import MLP
+
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+
+    csv_dir = "{working_dir}/csv_files"
+    dataset = GenDataset(csv_dir=csv_dir)
+    task = GenTask(dataset)
+    db = dataset.get_db()
+
+    col_to_stype_dict = get_stype_proposal(db)
+    data, col_stats_dict = make_pkey_fkey_graph(
+        db,
+        col_to_stype_dict=col_to_stype_dict,
+        text_embedder_cfg=None,
+        cache_dir="{working_dir}/cache/",
+    )
+
+    channels = 128
+    num_layers = 2
+    num_neighbors = [128] * num_layers
+
+    class Model(torch.nn.Module):
+        def __init__(self, data, col_stats_dict, num_layers, channels, out_channels):
+            super().__init__()
+            self.encoder = HeteroEncoder(
+                channels=channels,
+                node_to_col_names_dict={{
+                    node_type: data[node_type].tf.col_names_dict
+                    for node_type in data.node_types
+                }},
+                node_to_col_stats=col_stats_dict,
+            )
+            self.temporal_encoder = HeteroTemporalEncoder(
+                node_types=[
+                    nt for nt in data.node_types if "time" in data[nt]
+                ],
+                channels=channels,
+            )
+            self.gnn = HeteroGraphSAGE(
+                node_types=data.node_types,
+                edge_types=data.edge_types,
+                channels=channels,
+                aggr="sum",
+                num_layers=num_layers,
+            )
+            self.head = MLP(channels, out_channels=out_channels, norm="batch_norm", num_layers=1)
+            self.reset_parameters()
+
+        def reset_parameters(self):
+            self.encoder.reset_parameters()
+            self.temporal_encoder.reset_parameters()
+            self.gnn.reset_parameters()
+            self.head.reset_parameters()
+
+        def forward(self, batch, entity_table):
+            seed_time = batch[entity_table].seed_time
+            x_dict = self.encoder(batch.tf_dict)
+            rel_time_dict = self.temporal_encoder(seed_time, batch.time_dict, batch.batch_dict)
+            for node_type, rel_time in rel_time_dict.items():
+                x_dict[node_type] = x_dict[node_type] + rel_time
+            x_dict = self.gnn(
+                x_dict, batch.edge_index_dict,
+                batch.num_sampled_nodes_dict, batch.num_sampled_edges_dict,
+            )
+            return self.head(x_dict[entity_table][:seed_time.size(0)])
+
+    model = Model(data, col_stats_dict, num_layers, channels, channels).to(device)
+    model.load_state_dict(torch.load(model_path, map_location=device))
+    model.eval()
+
+    split_table = task.get_table(split)
+    eval_k = task.eval_k
+    src_entity_table = task.src_entity_table
+    dst_entity_table = task.dst_entity_table
+    num_dst = task.num_dst_nodes
+
+    eval_time_np = to_unix_time(split_table.df[split_table.time_col].iloc[:1])
+    eval_seed_time = int(eval_time_np[0])
+
+    dst_loader = NeighborLoader(
+        data, num_neighbors=num_neighbors, time_attr="time",
+        input_nodes=(dst_entity_table, torch.arange(num_dst)),
+        input_time=torch.full((num_dst,), eval_seed_time),
+        batch_size=512, shuffle=False, num_workers=0,
+    )
+    dst_embs = []
+    with torch.no_grad():
+        for batch in tqdm(dst_loader, desc="Dst embeddings"):
+            batch = batch.to(device)
+            dst_embs.append(model(batch, dst_entity_table).cpu())
+    all_dst_emb = torch.cat(dst_embs, dim=0)
+
+    src_nodes = torch.from_numpy(split_table.df[task.src_entity_col].astype(int).values)
+    src_time = torch.from_numpy(to_unix_time(split_table.df[split_table.time_col]))
+    src_loader = NeighborLoader(
+        data, num_neighbors=num_neighbors, time_attr="time",
+        input_nodes=(src_entity_table, src_nodes), input_time=src_time,
+        batch_size=512, shuffle=False, num_workers=0,
+    )
+    src_embs = []
+    with torch.no_grad():
+        for batch in tqdm(src_loader, desc="Src embeddings"):
+            batch = batch.to(device)
+            src_embs.append(model(batch, src_entity_table).cpu())
+    all_src_emb = torch.cat(src_embs, dim=0)
+
+    pred_indices = []
+    for i in range(0, all_src_emb.size(0), 128):
+        chunk = all_src_emb[i:i + 128]
+        scores = chunk @ all_dst_emb.T
+        topk = scores.topk(min(eval_k, scores.size(1)), dim=1).indices
+        pred_indices.append(topk)
+    pred = torch.cat(pred_indices, dim=0).numpy()
+
+    metrics = task.evaluate(pred, split_table)
+    return pred, metrics
+
+
+if __name__ == "__main__":
+    model_path = "{working_dir}/best_model.pt"
+    pred, metrics = load_model_and_predict(model_path, split="test")
+    print(f"Test metrics: {{metrics}}")
+    print(f"Predictions shape: {{pred.shape}}")
+'''

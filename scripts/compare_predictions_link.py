@@ -1,51 +1,52 @@
 #!/usr/bin/env python3
 """
-Re-run model inference from a workdir session and compare predictions against
-author ground truth tables.  Includes an integrated fairness check that
-verifies timestamp alignment, task-definition alignment, hyperparameter
-consistency, and matched-row coverage before showing the metric comparison.
+Re-run link-prediction model inference from a workdir session and compare
+recommendations against author ground truth tables.  Includes an integrated
+fairness check that verifies timestamp alignment, task-definition alignment,
+hyperparameter consistency, and matched-row coverage before showing the
+metric comparison.
+
+This is the **recommendation / link-prediction** counterpart of
+``compare_predictions.py`` (which handles entity classification / regression).
 
 Usage:
-    python scripts/compare_predictions.py \\
-        --session session-4b1b925a-0e16-480b-88dd-98ae085708d9 \\
-        --dataset rel-hm --task user-churn
+    python scripts/compare_predictions_link.py \
+        --session session-abc123 \
+        --dataset rel-hm --task user-item-purchase
 
-    python scripts/compare_predictions.py \\
-        --session session-4b1b925a-0e16-480b-88dd-98ae085708d9 \\
-        --dataset rel-hm --task user-churn \\
-        --output results/hm_churn.json
+    python scripts/compare_predictions_link.py \
+        --session session-abc123 \
+        --dataset rel-amazon --task user-item-rate \
+        --output results/amazon_rate.json
 
     # Skip the fairness banner (e.g. in CI)
-    python scripts/compare_predictions.py ... --skip-fairness-check
+    python scripts/compare_predictions_link.py ... --skip-fairness-check
 
     # Just print the hyper-param config that will be used
-    python scripts/compare_predictions.py ... --show-config
+    python scripts/compare_predictions_link.py ... --show-config
 """
 
 import argparse
-import copy
 import importlib
 import json
-import math
 import os
 import re
 import sys
 import types
-~~
+
 import numpy as np
 import pandas as pd
 import torch
-from torch_geometric.loader import NeighborLoader
 from torch_geometric.nn import MLP
 
 # ── Ensure project root is importable ─────────────────────────────────────────
 PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, PROJECT_ROOT)
 
-from plexe.relbench.base import RecommendationTask, Table, TaskType
-from plexe.relbench.modeling.graph import make_pkey_fkey_graph, get_node_train_table_input
+from plexe.relbench.base import EntityTask, RecommendationTask, Table, TaskType
+from plexe.relbench.modeling.graph import make_pkey_fkey_graph
 from plexe.relbench.modeling.nn import HeteroEncoder, HeteroTemporalEncoder, HeteroGraphSAGE
-from plexe.relbench.modeling.utils import get_stype_proposal
+from plexe.relbench.modeling.utils import get_stype_proposal, to_unix_time
 from scripts.task_registry import DATASET_TASK_MAP
 
 # ── ANSI colours (gracefully degraded when piped) ─────────────────────────────
@@ -63,9 +64,27 @@ def _info(msg): print(f"     {msg}")
 def _hdr(msg):  print(f"\n{BOLD}{'─'*58}\n{msg}\n{'─'*58}{RESET}")
 
 
-# ── Model (must mirror train_script.py exactly) ────────────────────────────────
-class Model(torch.nn.Module):
-    def __init__(self, data, col_stats_dict, num_layers, channels, out_channels):
+# ── Two-tower link-prediction model (mirrors gnn_link.py) ────────────────────
+class ShallowEmbedding(torch.nn.Module):
+    """Per-node learnable embedding for ID-aware link prediction."""
+
+    def __init__(self, num_nodes: int, channels: int):
+        super().__init__()
+        self.emb = torch.nn.Embedding(num_nodes, channels)
+        torch.nn.init.normal_(self.emb.weight, std=0.1)
+
+    def forward(self, idx: torch.Tensor) -> torch.Tensor:
+        return self.emb(idx)
+
+    def reset_parameters(self):
+        torch.nn.init.normal_(self.emb.weight, std=0.1)
+
+
+class IdGNNModel(torch.nn.Module):
+    """ID-GNN model for link prediction (per-source scoring)."""
+
+    def __init__(self, data, col_stats_dict, num_layers, channels,
+                 num_src_nodes, num_dst_nodes):
         super().__init__()
         self.encoder = HeteroEncoder(
             channels=channels,
@@ -85,7 +104,7 @@ class Model(torch.nn.Module):
             aggr="sum",
             num_layers=num_layers,
         )
-        self.head = MLP(channels, out_channels=out_channels,
+        self.head = MLP(channels, out_channels=num_dst_nodes,
                         norm="batch_norm", num_layers=1)
         self.reset_parameters()
 
@@ -95,58 +114,101 @@ class Model(torch.nn.Module):
         self.gnn.reset_parameters()
         self.head.reset_parameters()
 
+    def forward(self, batch, src_entity_table):
+        seed_time = batch[src_entity_table].seed_time
+        x_dict = self.encoder(batch.tf_dict)
+        rel_time_dict = self.temporal_encoder(
+            seed_time, batch.time_dict, batch.batch_dict
+        )
+        for nt, rt in rel_time_dict.items():
+            x_dict[nt] = x_dict[nt] + rt
+        x_dict = self.gnn(
+            x_dict, batch.edge_index_dict,
+            batch.num_sampled_nodes_dict,
+            batch.num_sampled_edges_dict,
+        )
+        return self.head(x_dict[src_entity_table][:seed_time.size(0)])
+
+
+class TwoTowerModel(torch.nn.Module):
+    """Two-tower GNN model for link prediction (inner-product scoring)."""
+
+    def __init__(self, data, col_stats_dict, num_layers, channels):
+        super().__init__()
+        self.encoder = HeteroEncoder(
+            channels=channels,
+            node_to_col_names_dict={
+                nt: data[nt].tf.col_names_dict for nt in data.node_types
+            },
+            node_to_col_stats=col_stats_dict,
+        )
+        self.temporal_encoder = HeteroTemporalEncoder(
+            node_types=[nt for nt in data.node_types if "time" in data[nt]],
+            channels=channels,
+        )
+        self.gnn = HeteroGraphSAGE(
+            node_types=data.node_types,
+            edge_types=data.edge_types,
+            channels=channels,
+            aggr="sum",
+            num_layers=num_layers,
+        )
+        self.reset_parameters()
+
+    def reset_parameters(self):
+        self.encoder.reset_parameters()
+        self.temporal_encoder.reset_parameters()
+        self.gnn.reset_parameters()
+
     def forward(self, batch, entity_table):
         seed_time = batch[entity_table].seed_time
         x_dict = self.encoder(batch.tf_dict)
-        rel_time_dict = self.temporal_encoder(seed_time, batch.time_dict, batch.batch_dict)
+        rel_time_dict = self.temporal_encoder(
+            seed_time, batch.time_dict, batch.batch_dict
+        )
         for nt, rt in rel_time_dict.items():
             x_dict[nt] = x_dict[nt] + rt
-        x_dict = self.gnn(x_dict, batch.edge_index_dict,
-                          batch.num_sampled_nodes_dict,
-                          batch.num_sampled_edges_dict)
-        return self.head(x_dict[entity_table][:seed_time.size(0)])
+        x_dict = self.gnn(
+            x_dict, batch.edge_index_dict,
+            batch.num_sampled_nodes_dict,
+            batch.num_sampled_edges_dict,
+        )
+        return x_dict[entity_table][:seed_time.size(0)]
 
 
 # ── Hyper-param config reader ──────────────────────────────────────────────────
-# Author-recommended defaults (from snap-stanford/relbench/examples/gnn_entity.py)
 _AUTHOR_DEFAULTS = {
     "num_layers":        2,
     "channels":          128,
-    "num_neighbors":     128,   # author default; train_script often uses 128
-    "batch_size":        512,   # author default; train_script often uses 512
+    "num_neighbors":     128,
+    "batch_size":        512,
     "temporal_strategy": "uniform",
-    "tune_metric":       "roc_auc",
+    "model_type":        "idgnn",    # "idgnn" or "twotower"
 }
 
-# Regex patterns for parsing train_script.py
 _RE_NUM_NEIGHBORS = re.compile(r"num_neighbors\s*=\s*\[(\d+)\]\s*\*\s*(\d+)")
 _RE_BATCH_SIZE    = re.compile(r"batch_size\s*=\s*(\d+)")
 _RE_NUM_LAYERS    = re.compile(r"num_layers\s*=\s*(\d+)")
 _RE_CHANNELS      = re.compile(r"\bchannels\s*=\s*(\d+)")
-_RE_TUNE_METRIC   = re.compile(r'tune_metric\s*=\s*["\'](\w+)["\']')
+_RE_MODEL_TYPE    = re.compile(r'model_type\s*=\s*["\'](\w+)["\']')
 
 
 def load_model_config(session_path: str, gen_task=None) -> dict:
     """
     Read hyper-parameters in priority order:
-      1. session/model_config.json  (explicit — future-proof)
-      2. session/train_script.py    (parse with regex)
-      3. Author defaults from gnn_entity.py
-
-    Also derives ``out_channels`` from the GenTask task_type when provided.
+      1. session/model_config.json
+      2. session/train_script.py (regex parsing)
+      3. Author defaults
     """
-    cfg = dict(_AUTHOR_DEFAULTS)  # start from author defaults
+    cfg = dict(_AUTHOR_DEFAULTS)
     source = "author defaults"
 
-    # ── 1. model_config.json ──────────────────────────────────────────────
     config_path = os.path.join(session_path, "model_config.json")
     if os.path.exists(config_path):
         with open(config_path) as f:
             saved = json.load(f)
         cfg.update({k: v for k, v in saved.items() if k in cfg})
         source = "model_config.json"
-
-    # ── 2. train_script.py regex fallback ────────────────────────────────
     else:
         ts_path = os.path.join(session_path, "train_script.py")
         if os.path.exists(ts_path):
@@ -154,32 +216,25 @@ def load_model_config(session_path: str, gen_task=None) -> dict:
             m = _RE_NUM_NEIGHBORS.search(text)
             if m:
                 cfg["num_neighbors"] = int(m.group(1))
-                cfg["num_layers"] = int(m.group(2))   # num_layers = list length
+                cfg["num_layers"] = int(m.group(2))
             m = _RE_BATCH_SIZE.search(text)
             if m:
                 cfg["batch_size"] = int(m.group(1))
-            m = _RE_NUM_LAYERS.search(text)           # explicit num_layers= line
+            m = _RE_NUM_LAYERS.search(text)
             if m:
                 cfg["num_layers"] = int(m.group(1))
             m = _RE_CHANNELS.search(text)
             if m:
                 cfg["channels"] = int(m.group(1))
-            m = _RE_TUNE_METRIC.search(text)
+            m = _RE_MODEL_TYPE.search(text)
             if m:
-                cfg["tune_metric"] = m.group(1)
+                cfg["model_type"] = m.group(1)
             source = "train_script.py (parsed)"
 
-    # ── 3. Derive out_channels from task_type ────────────────────────────
-    if gen_task is not None:
-        tt = gen_task.task_type
-        if tt == TaskType.MULTICLASS_CLASSIFICATION:
-            cfg["out_channels"] = getattr(gen_task, "num_classes", 1)
-        elif tt == TaskType.MULTILABEL_CLASSIFICATION:
-            cfg["out_channels"] = getattr(gen_task, "num_labels", 1)
-        else:
-            cfg["out_channels"] = 1          # binary classification or regression
-    else:
-        cfg.setdefault("out_channels", 1)
+    if gen_task is not None and isinstance(gen_task, RecommendationTask):
+        cfg["num_dst_nodes"] = gen_task.num_dst_nodes
+        cfg["num_src_nodes"] = gen_task.num_src_nodes
+        cfg["eval_k"] = gen_task.eval_k
 
     cfg["_source"] = source
     return cfg
@@ -190,7 +245,7 @@ def load_session_modules(session_path):
     """Dynamically import GenDataset and GenTask from a session directory."""
     if session_path not in sys.path:
         sys.path.insert(0, session_path)
-    folder_name   = os.path.basename(session_path)
+    folder_name    = os.path.basename(session_path)
     workdir_parent = os.path.dirname(os.path.dirname(session_path))
     if workdir_parent not in sys.path:
         sys.path.insert(0, workdir_parent)
@@ -198,28 +253,52 @@ def load_session_modules(session_path):
         dm = importlib.import_module(f"workdir.{folder_name}.dataset")
         GenDataset = dm.GenDataset
     except Exception as e:
-        raise RuntimeError(f"Cannot import GenDataset from {session_path}/dataset.py: {e}")
+        raise RuntimeError(
+            f"Cannot import GenDataset from {session_path}/dataset.py: {e}"
+        )
     try:
         tm = importlib.import_module(f"workdir.{folder_name}.task")
         GenTask = tm.GenTask
     except Exception as e:
-        raise RuntimeError(f"Cannot import GenTask from {session_path}/task.py: {e}")
+        raise RuntimeError(
+            f"Cannot import GenTask from {session_path}/task.py: {e}"
+        )
     return GenDataset, GenTask
 
 
-# ── Inference ─────────────────────────────────────────────────────────────────
-def run_inference(model, loader, device, entity_table):
+# ── Link-prediction inference ─────────────────────────────────────────────────
+def run_link_inference_idgnn(model, loader, device, src_entity_table,
+                             num_dst_nodes, eval_k):
+    """Run inference with ID-GNN model: output is (N, eval_k) top-k dst indices."""
     model.eval()
-    preds = []
+    all_topk = []
     with torch.no_grad():
         for batch in loader:
             batch = batch.to(device)
-            pred = model(batch, entity_table)
-            pred = pred.view(-1) if pred.size(1) == 1 else pred
-            preds.append(pred.detach().cpu())
-    if not preds:
-        return np.array([])
-    return torch.cat(preds, dim=0).numpy()
+            logits = model(batch, src_entity_table)
+            topk = logits.topk(eval_k, dim=1).indices
+            all_topk.append(topk.cpu())
+    if not all_topk:
+        return np.array([]).reshape(0, eval_k)
+    return torch.cat(all_topk, dim=0).numpy()
+
+
+def run_link_inference_twotower(src_model, loader, device,
+                                src_entity_table, dst_entity_table,
+                                dst_emb, eval_k):
+    """Run inference with two-tower model: inner-product scoring."""
+    src_model.eval()
+    all_topk = []
+    with torch.no_grad():
+        for batch in loader:
+            batch = batch.to(device)
+            src_embs = src_model(batch, src_entity_table)
+            scores = src_embs @ dst_emb.T
+            topk = scores.topk(eval_k, dim=1).indices
+            all_topk.append(topk.cpu())
+    if not all_topk:
+        return np.array([]).reshape(0, eval_k)
+    return torch.cat(all_topk, dim=0).numpy()
 
 
 # ── Fairness check ─────────────────────────────────────────────────────────────
@@ -229,14 +308,10 @@ def run_fairness_check(gen_dataset, gen_task,
                        author_tables_dir: str,
                        dataset_name: str, task_name: str,
                        splits: list) -> dict:
-    """
-    Print a compact fairness report and return a summary dict with keys:
-      timestamp_ok, task_ok, coverage (per split).
-    """
-    _hdr("Fairness Check")
+    _hdr("Fairness Check (Link Prediction)")
     summary = {"timestamp_ok": True, "task_ok": True, "coverage": {}}
 
-    # ── 1. Timestamp alignment ────────────────────────────────────────────
+    # 1. Timestamp alignment
     print(f"\n  {'':30s} {'GenDataset':>20}  {'AuthorDataset':>20}")
     for attr in ("val_timestamp", "test_timestamp"):
         gv = getattr(gen_dataset, attr, None)
@@ -253,26 +328,29 @@ def run_fairness_check(gen_dataset, gen_task,
         print(f"\n  {RED}→ Timestamp mismatch means train/test splits are DIFFERENT.")
         print(f"    matched_rows will likely be ~0 and author_metrics unreliable.{RESET}")
 
-    # ── 2. Task-definition alignment ──────────────────────────────────────
+    # 2. Task-definition alignment (link-prediction specific fields)
     print()
-    task_fields = ["entity_col", "entity_table", "time_col", "target_col",
-                   "timedelta", "task_type"]
+    task_fields = [
+        "src_entity_col", "src_entity_table",
+        "dst_entity_col", "dst_entity_table",
+        "time_col", "timedelta", "task_type", "eval_k",
+    ]
     for field in task_fields:
         gv = str(getattr(gen_task,    field, "N/A"))
         av = str(getattr(author_task, field, "N/A"))
         if gv == av:
-            _ok(f"{field:<20} = {gv}")
+            _ok(f"{field:<24} = {gv}")
         else:
-            _fail(f"{field:<20}: GenTask={gv!r}  AuthorTask={av!r}")
+            _fail(f"{field:<24}: GenTask={gv!r}  AuthorTask={av!r}")
             summary["task_ok"] = False
 
     if not summary["task_ok"]:
-        print(f"\n  {RED}→ Task-definition mismatch: metric columns measure DIFFERENT things.{RESET}")
+        print(f"\n  {RED}→ Task-definition mismatch: metrics will measure DIFFERENT things.{RESET}")
 
-    # ── 3. Hyperparameter transparency ───────────────────────────────────
+    # 3. Hyperparameter transparency
     print(f"\n  Hyperparams (source: {BOLD}{cfg['_source']}{RESET})")
     _info(f"num_layers={cfg['num_layers']}  channels={cfg['channels']}  "
-          f"out_channels={cfg['out_channels']}")
+          f"model_type={cfg['model_type']}")
     _info(f"num_neighbors={cfg['num_neighbors']}  batch_size={cfg['batch_size']}  "
           f"temporal_strategy={cfg['temporal_strategy']}")
 
@@ -282,10 +360,16 @@ def run_fairness_check(gen_dataset, gen_task,
     else:
         _ok(f"num_neighbors matches author reference ({ref_nn})")
 
-    # ── 4. matched_rows coverage ──────────────────────────────────────────
+    # 4. Matched-row coverage
     print()
+    src_col_gen  = gen_task.src_entity_col
+    src_col_auth = author_task.src_entity_col
+    time_col_gen  = gen_task.time_col
+    time_col_auth = author_task.time_col
     for split in splits:
-        parquet = os.path.join(author_tables_dir, dataset_name, task_name, f"{split}.parquet")
+        parquet = os.path.join(
+            author_tables_dir, dataset_name, task_name, f"{split}.parquet"
+        )
         if not os.path.exists(parquet):
             _warn(f"[{split}] Author parquet not found — run download_author_tables.py first")
             summary["coverage"][split] = None
@@ -300,16 +384,16 @@ def run_fairness_check(gen_dataset, gen_task,
             continue
 
         merged = pd.merge(
-            gen_tbl.df[[gen_task.entity_col, gen_task.time_col]].rename(
-                columns={gen_task.entity_col: "_e", gen_task.time_col: "_t"}),
-            author_tbl.df[[author_task.entity_col, author_task.time_col]].rename(
-                columns={author_task.entity_col: "_e", author_task.time_col: "_t"}),
-            on=["_e", "_t"], how="inner",
+            gen_tbl.df[[src_col_gen, time_col_gen]].rename(
+                columns={src_col_gen: "_src", time_col_gen: "_t"}),
+            author_tbl.df[[src_col_auth, time_col_auth]].rename(
+                columns={src_col_auth: "_src", time_col_auth: "_t"}),
+            on=["_src", "_t"], how="inner",
         )
-        gen_n    = len(gen_tbl.df)
-        auth_n   = len(author_tbl.df)
-        match_n  = len(merged)
-        cov      = match_n / auth_n if auth_n else 0
+        gen_n   = len(gen_tbl.df)
+        auth_n  = len(author_tbl.df)
+        match_n = len(merged)
+        cov     = match_n / auth_n if auth_n else 0
         summary["coverage"][split] = cov
 
         cov_str = f"{cov:.1%}  ({match_n:,} / {auth_n:,} author rows)"
@@ -323,7 +407,7 @@ def run_fairness_check(gen_dataset, gen_task,
 # ── Comparison table printer ───────────────────────────────────────────────────
 def format_table(split, gen_metrics, author_metrics, gen_rows, author_rows, matched_rows):
     all_m = sorted(set(list(gen_metrics) + list(author_metrics)))
-    w1, w2, w3 = 22, 14, 14
+    w1, w2, w3 = 30, 14, 14
     sep = f"+{'-'*w1}+{'-'*w2}+{'-'*w3}+"
     lines = [f"\nSplit: {split}", sep,
              f"|{'Metric':<{w1}}|{'GenTask':^{w2}}|{'Author Task':^{w3}}|", sep]
@@ -341,14 +425,14 @@ def format_table(split, gen_metrics, author_metrics, gen_rows, author_rows, matc
 # ── Main ───────────────────────────────────────────────────────────────────────
 def main():
     parser = argparse.ArgumentParser(
-        description="Compare model predictions against author ground truth (with fairness check)"
+        description="Compare link-prediction model against author ground truth (with fairness check)"
     )
     parser.add_argument("--session",  required=True,
                         help="Session folder name or full path")
     parser.add_argument("--dataset",  required=True,
                         help="Dataset name (e.g. rel-hm)")
     parser.add_argument("--task",     required=True,
-                        help="Task name (e.g. user-churn)")
+                        help="Task name (e.g. user-item-purchase)")
     parser.add_argument("--workdir",  default="./workdir",
                         help="Root workdir path (default: ./workdir)")
     parser.add_argument("--author-tables-dir", default="./data/author_tables",
@@ -379,20 +463,20 @@ def main():
     AuthorDatasetClass = ds_info["DatasetClass"]
     AuthorTaskClass    = ds_info["tasks"][args.task]
 
-    # ── Guard: recommendation tasks need a different script ───────────────
-    if issubclass(AuthorTaskClass, RecommendationTask):
-        _link_tasks = [
-            t for t, cls in ds_info["tasks"].items()
-            if issubclass(cls, RecommendationTask)
-        ]
+    # ── Guard: entity tasks need a different script ───────────────────────
+    if not issubclass(AuthorTaskClass, RecommendationTask):
         _entity_tasks = [
             t for t, cls in ds_info["tasks"].items()
             if not issubclass(cls, RecommendationTask)
         ]
+        _link_tasks = [
+            t for t, cls in ds_info["tasks"].items()
+            if issubclass(cls, RecommendationTask)
+        ]
         print(
-            f"{RED}Error: '{args.task}' is a recommendation (link-prediction) task.\n"
-            f"  This script only supports entity-level tasks (classification / regression).\n"
-            f"  Use  scripts/compare_predictions_link.py  instead for link-prediction.\n\n"
+            f"{RED}Error: '{args.task}' is an entity-level task (classification / regression).\n"
+            f"  This script only supports recommendation (link-prediction) tasks.\n"
+            f"  Use  scripts/compare_predictions.py  instead for entity tasks.\n\n"
             f"  Entity tasks for '{args.dataset}':        {_entity_tasks}\n"
             f"  Recommendation tasks for '{args.dataset}': {_link_tasks}{RESET}"
         )
@@ -430,10 +514,14 @@ def main():
     print(f"\n{BOLD}[1/4] Loading session modules…{RESET}")
     GenDataset, GenTask = load_session_modules(session_path)
 
-    gen_dataset   = GenDataset(csv_dir=csv_dir)
-    gen_task      = GenTask(gen_dataset)
-    db            = gen_dataset.get_db()
-    entity_table  = gen_task.entity_table
+    gen_dataset = GenDataset(csv_dir=csv_dir)
+    gen_task    = GenTask(gen_dataset)
+    db          = gen_dataset.get_db()
+
+    src_entity_table = gen_task.src_entity_table
+    dst_entity_table = gen_task.dst_entity_table
+    eval_k           = gen_task.eval_k
+    num_dst_nodes    = gen_task.num_dst_nodes
 
     # ── Resolve model config ─────────────────────────────────────────────
     cfg = load_model_config(session_path, gen_task)
@@ -446,9 +534,10 @@ def main():
         sys.exit(0)
 
     print(f"  Config source: {cfg['_source']}")
-    print(f"  num_layers={cfg['num_layers']}  channels={cfg['channels']}  "
-          f"out_channels={cfg['out_channels']}")
-    print(f"  num_neighbors={cfg['num_neighbors']}  batch_size={cfg['batch_size']}")
+    print(f"  model_type={cfg['model_type']}  num_layers={cfg['num_layers']}  "
+          f"channels={cfg['channels']}")
+    print(f"  num_neighbors={cfg['num_neighbors']}  batch_size={cfg['batch_size']}  "
+          f"eval_k={eval_k}")
 
     # ── Get GenTask tables ───────────────────────────────────────────────
     gen_tables = {}
@@ -476,7 +565,6 @@ def main():
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     print(f"  Device: {device}")
 
-    # Text embedder (GloVe, with graceful fallback)
     text_embedder_cfg = None
     try:
         from sentence_transformers import SentenceTransformer
@@ -501,7 +589,6 @@ def main():
 
     col_to_stype_dict = get_stype_proposal(db)
 
-    # Convert text columns to categorical when no embedder available
     if text_embedder_cfg is None:
         from torch_frame import stype
         for tname in col_to_stype_dict:
@@ -518,20 +605,25 @@ def main():
         cache_dir=cache_dir,
     )
 
-    # Build loaders — use hyperparams from config, not hardcoded values
     num_neighbors_list = [cfg["num_neighbors"]] * cfg["num_layers"]
+
+    # Build link-prediction loaders using NeighborLoader on src nodes
+    from torch_geometric.loader import NeighborLoader
+
     loader_dict = {}
     for split in splits:
-        table_input = get_node_train_table_input(
-            table=gen_tables[split], task=gen_task
+        table = gen_tables[split]
+        src_nodes = torch.from_numpy(
+            table.df[gen_task.src_entity_col].astype(int).values
         )
+        src_time = torch.from_numpy(to_unix_time(table.df[table.time_col]))
+
         loader_dict[split] = NeighborLoader(
             data,
             num_neighbors=num_neighbors_list,
             time_attr="time",
-            input_nodes=table_input.nodes,
-            input_time=table_input.time,
-            transform=table_input.transform,
+            input_nodes=(src_entity_table, src_nodes),
+            input_time=src_time,
             batch_size=cfg["batch_size"],
             temporal_strategy=cfg["temporal_strategy"],
             shuffle=False,
@@ -539,29 +631,55 @@ def main():
             persistent_workers=False,
         )
 
-    # Build model from config
-    model = Model(
-        data=data,
-        col_stats_dict=col_stats_dict,
-        num_layers=cfg["num_layers"],
-        channels=cfg["channels"],
-        out_channels=cfg["out_channels"],
-    ).to(device)
+    # Build model
+    model_type = cfg["model_type"]
+    if model_type == "idgnn":
+        model = IdGNNModel(
+            data=data,
+            col_stats_dict=col_stats_dict,
+            num_layers=cfg["num_layers"],
+            channels=cfg["channels"],
+            num_src_nodes=gen_task.num_src_nodes,
+            num_dst_nodes=num_dst_nodes,
+        ).to(device)
+    elif model_type == "twotower":
+        model = TwoTowerModel(
+            data=data,
+            col_stats_dict=col_stats_dict,
+            num_layers=cfg["num_layers"],
+            channels=cfg["channels"],
+        ).to(device)
+    else:
+        print(f"Error: Unknown model_type '{model_type}'. Must be 'idgnn' or 'twotower'.")
+        sys.exit(1)
 
     state_dict = torch.load(model_path, map_location=device, weights_only=True)
     model.load_state_dict(state_dict)
-    print(f"  Model loaded from {model_path}")
+    print(f"  Model loaded from {model_path}  (type={model_type})")
 
     # ── Step 4: Inference ────────────────────────────────────────────────
-    print(f"\n{BOLD}[3/4] Running inference…{RESET}")
+    print(f"\n{BOLD}[3/4] Running link-prediction inference…{RESET}")
     gen_predictions = {}
     gen_metrics     = {}
+
     for split in splits:
-        pred = run_inference(model, loader_dict[split], device, entity_table)
+        if model_type == "idgnn":
+            pred = run_link_inference_idgnn(
+                model, loader_dict[split], device,
+                src_entity_table, num_dst_nodes, eval_k,
+            )
+        else:
+            # Two-tower: need all dst embeddings first
+            dst_emb = model.encoder(data.tf_dict)[dst_entity_table].to(device)
+            pred = run_link_inference_twotower(
+                model, loader_dict[split], device,
+                src_entity_table, dst_entity_table,
+                dst_emb, eval_k,
+            )
         gen_predictions[split] = pred
-        if len(pred) > 0:
+        if pred.shape[0] > 0:
             gen_metrics[split] = gen_task.evaluate(pred, gen_tables[split])
-            print(f"  [{split}] GenTask metrics: {gen_metrics[split]} ({len(pred)} rows)")
+            print(f"  [{split}] GenTask metrics: {gen_metrics[split]} ({pred.shape[0]} rows)")
         else:
             gen_metrics[split] = {}
             print(f"  [{split}] No predictions generated")
@@ -585,55 +703,59 @@ def main():
         gen_table    = gen_tables[split]
         pred         = gen_predictions[split]
 
-        if len(pred) == 0:
+        if pred.shape[0] == 0:
             comparison_results[split] = {"error": "No predictions available"}
             continue
 
-        # Row alignment: merge on (entity, time)
-        gen_df          = gen_table.df.copy()
-        gen_df["__p__"] = pred
-        author_df       = author_table.df.copy()
+        # Row alignment: merge on (src_entity, time)
+        gen_df   = gen_table.df.copy()
+        gen_src  = gen_task.src_entity_col
+        gen_tc   = gen_task.time_col
+        auth_src = author_task.src_entity_col
+        auth_tc  = author_task.time_col
 
-        gen_ec   = gen_task.entity_col;   gen_tc   = gen_task.time_col
-        auth_ec  = author_task.entity_col; auth_tc = author_task.time_col
+        gen_df["__pred_idx__"] = range(len(gen_df))
 
         merged = pd.merge(
-            gen_df[[gen_ec, gen_tc, "__p__"]].rename(
-                columns={gen_ec: "_e", gen_tc: "_t"}),
-            author_df.rename(columns={auth_ec: "_e", auth_tc: "_t"}),
-            on=["_e", "_t"], how="inner",
+            gen_df[[gen_src, gen_tc, "__pred_idx__"]].rename(
+                columns={gen_src: "_src", gen_tc: "_t"}),
+            author_table.df.reset_index().rename(
+                columns={auth_src: "_src", auth_tc: "_t", "index": "_auth_idx"}),
+            on=["_src", "_t"], how="inner",
         )
 
-        matched_rows  = len(merged)
-        gen_rows      = len(gen_df)
-        author_rows   = len(author_df)
+        matched_rows = len(merged)
+        gen_rows     = len(gen_df)
+        author_rows  = len(author_table.df)
 
         author_metrics_split = {}
         if matched_rows > 0:
+            matched_pred_indices = merged["__pred_idx__"].values
+            matched_pred = pred[matched_pred_indices]
+
             matched_author_df = merged.rename(
-                columns={"_e": auth_ec, "_t": auth_tc}
+                columns={"_src": auth_src, "_t": auth_tc}
             )
             author_table_cols = list(author_table.df.columns)
             matched_author_table = Table(
-                df=matched_author_df[author_table_cols],
+                df=matched_author_df[author_table_cols].reset_index(drop=True),
                 fkey_col_to_pkey_table=author_table.fkey_col_to_pkey_table,
                 pkey_col=author_table.pkey_col,
                 time_col=author_table.time_col,
             )
-            matched_pred = merged["__p__"].to_numpy()
             try:
-                author_metrics_split = author_task.evaluate(matched_pred, matched_author_table)
+                author_metrics_split = author_task.evaluate(
+                    matched_pred, matched_author_table
+                )
             except Exception as e:
                 author_metrics_split = {"error": str(e)}
                 print(f"  [{split}] Author evaluation error: {e}")
 
-        # Coverage warning
         cov = matched_rows / author_rows if author_rows else 0
         if 0 < cov < 0.70:
             print(f"  {YELLOW}⚠️  [{split}] Only {cov:.1%} of author rows matched "
                   f"— author_metrics may be unreliable.{RESET}")
 
-        # Print comparison table
         clean_author_m = (
             author_metrics_split
             if isinstance(author_metrics_split, dict)
@@ -662,6 +784,7 @@ def main():
         "session":          args.session,
         "dataset":          args.dataset,
         "task":             args.task,
+        "task_type":        "link_prediction",
         "model_config":     {k: v for k, v in cfg.items() if not k.startswith("_")},
         "fairness_summary": fairness_summary,
         "splits":           comparison_results,

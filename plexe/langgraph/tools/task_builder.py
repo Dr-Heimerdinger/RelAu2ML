@@ -899,6 +899,34 @@ def register_task_code(
         logging.warning(f"Generated code has syntax error: {e}")
         syntax_warnings.append(f"Syntax error at line {e.lineno}: {e.msg}")
 
+    if task_type == "link_prediction" and "eval_k" not in sanitized_code:
+        import re
+        import logging
+        logging.warning("Link prediction task missing eval_k, injecting default")
+        match = re.search(
+            r"^([ \t]+)(metrics\s*=\s*\[.*\])",
+            sanitized_code,
+            re.MULTILINE,
+        )
+        if match:
+            indent = match.group(1)
+            sanitized_code = sanitized_code.replace(
+                match.group(0),
+                match.group(0) + f"\n{indent}eval_k = 10",
+            )
+        else:
+            match = re.search(
+                r"^([ \t]+)(timedelta\s*=.*)",
+                sanitized_code,
+                re.MULTILINE,
+            )
+            if match:
+                indent = match.group(1)
+                sanitized_code = sanitized_code.replace(
+                    match.group(0),
+                    match.group(0) + f"\n{indent}eval_k = 10",
+                )
+
     with open(file_path, 'w') as f:
         f.write(sanitized_code)
 
