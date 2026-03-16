@@ -722,25 +722,84 @@ def test_sql_query(
         # At runtime, the real timestamp_df will be provided by the task framework.
         # Here we derive a representative date from the loaded tables so that
         # temporal JOINs find matching rows, producing a more realistic test.
+        #
+        # OPTIMIZATION: The original loop was extremely slow on large datasets
+        # (e.g., Stack Exchange with 26M rows) because it ran SELECT DISTINCT on
+        # every column including large text fields. Now we:
+        # 1. Use DuckDB's type inference to find TIMESTAMP columns directly
+        # 2. Skip columns with names indicating text content
+        # 3. Only fall back to pandas parsing for columns with datetime-like names
+        # 4. Limit the number of columns checked per table
+        
+        # Column name patterns to skip (never datetime)
+        SKIP_NAME_PATTERNS = frozenset([
+            'text', 'body', 'aboutme', 'content', 'description', 'comment',
+            'title', 'tags', 'name', 'displayname', 'url', 'license', 'html',
+            'markdown', 'summary', 'bio', 'address', 'email', 'phone',
+        ])
+        # Column name patterns likely to be datetime
+        DATETIME_NAME_PATTERNS = ('date', 'time', 'created', 'updated', 'timestamp', 'modified')
+        
         all_dates = []
+        MAX_DATES_NEEDED = 100  # Stop once we have enough representative dates
+        
         for f in os.listdir(csv_dir):
             if f.endswith('.csv'):
+                if len(all_dates) >= MAX_DATES_NEEDED:
+                    break
+                table_name = f.replace('.csv', '')
                 try:
-                    tbl = conn.execute(f"SELECT * FROM {f.replace('.csv', '')} LIMIT 0").fetchdf()
-                    for col in tbl.columns:
+                    # Get column types from DuckDB's schema inference
+                    schema_df = conn.execute(
+                        f"DESCRIBE SELECT * FROM {table_name}"
+                    ).fetchdf()
+                    
+                    for _, row in schema_df.iterrows():
+                        if len(all_dates) >= MAX_DATES_NEEDED:
+                            break
+                        col = row['column_name']
+                        col_type = str(row['column_type']).upper()
                         col_lower = col.lower()
+                        
+                        # Skip ID columns
                         if col_lower.endswith('id') or col_lower == 'id':
                             continue
-                        try:
-                            sample = conn.execute(
-                                f"SELECT DISTINCT \"{col}\" FROM {f.replace('.csv', '')} "
-                                f"WHERE \"{col}\" IS NOT NULL LIMIT 500"
-                            ).fetchdf()
-                            parsed = pd.to_datetime(sample[col], errors='coerce').dropna()
-                            if len(parsed) > len(sample) * 0.3:
-                                all_dates.extend(parsed.tolist())
-                        except Exception:
-                            pass
+                        
+                        # Skip known text columns by name
+                        if any(skip in col_lower for skip in SKIP_NAME_PATTERNS):
+                            continue
+                        
+                        # Method 1: DuckDB already detected as timestamp
+                        if 'TIMESTAMP' in col_type or 'DATE' in col_type:
+                            try:
+                                sample = conn.execute(
+                                    f'SELECT "{col}" FROM {table_name} '
+                                    f'WHERE "{col}" IS NOT NULL LIMIT 50'
+                                ).fetchdf()
+                                if len(sample) > 0:
+                                    dates = pd.to_datetime(sample[col], errors='coerce').dropna()
+                                    all_dates.extend(dates.tolist()[:20])
+                            except Exception:
+                                pass
+                            continue
+                        
+                        # Method 2: Column name suggests datetime, try parsing
+                        if any(pat in col_lower for pat in DATETIME_NAME_PATTERNS):
+                            try:
+                                # Use a simple LIMIT instead of DISTINCT to avoid slow scans
+                                sample = conn.execute(
+                                    f'SELECT "{col}" FROM {table_name} '
+                                    f'WHERE "{col}" IS NOT NULL LIMIT 100'
+                                ).fetchdf()
+                                if len(sample) > 0:
+                                    # Use format='mixed' for faster parsing
+                                    parsed = pd.to_datetime(
+                                        sample[col], errors='coerce', format='mixed'
+                                    ).dropna()
+                                    if len(parsed) > len(sample) * 0.3:
+                                        all_dates.extend(parsed.tolist()[:20])
+                            except Exception:
+                                pass
                 except Exception:
                     pass
 
