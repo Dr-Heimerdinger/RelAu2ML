@@ -31,7 +31,6 @@ import os
 import re
 import sys
 import types
-~~
 import numpy as np
 import pandas as pd
 import torch
@@ -124,6 +123,8 @@ _RE_BATCH_SIZE    = re.compile(r"batch_size\s*=\s*(\d+)")
 _RE_NUM_LAYERS    = re.compile(r"num_layers\s*=\s*(\d+)")
 _RE_CHANNELS      = re.compile(r"\bchannels\s*=\s*(\d+)")
 _RE_TUNE_METRIC   = re.compile(r'tune_metric\s*=\s*["\'](\w+)["\']')
+_RE_MODEL_INIT    = re.compile(r"Model\s*\(")
+_RE_LOADER_INIT   = re.compile(r"NeighborLoader\s*\(")
 
 
 def load_model_config(session_path: str, gen_task=None) -> dict:
@@ -151,16 +152,51 @@ def load_model_config(session_path: str, gen_task=None) -> dict:
         ts_path = os.path.join(session_path, "train_script.py")
         if os.path.exists(ts_path):
             text = open(ts_path).read()
+
+            got_layers_from_neighbors = False
             m = _RE_NUM_NEIGHBORS.search(text)
             if m:
                 cfg["num_neighbors"] = int(m.group(1))
-                cfg["num_layers"] = int(m.group(2))   # num_layers = list length
-            m = _RE_BATCH_SIZE.search(text)
-            if m:
-                cfg["batch_size"] = int(m.group(1))
-            m = _RE_NUM_LAYERS.search(text)           # explicit num_layers= line
-            if m:
-                cfg["num_layers"] = int(m.group(1))
+                cfg["num_layers"] = int(m.group(2))
+                got_layers_from_neighbors = True
+
+            # batch_size: find the one belonging to NeighborLoader, not
+            # TextEmbedderConfig.  Walk all matches and pick the one whose
+            # position is closest *after* a NeighborLoader( call.
+            loader_pos = _RE_LOADER_INIT.search(text)
+            loader_offset = loader_pos.start() if loader_pos else 0
+            best_bs, best_dist = None, None
+            for bm in _RE_BATCH_SIZE.finditer(text):
+                if bm.start() >= loader_offset and loader_pos:
+                    dist = bm.start() - loader_offset
+                    if best_dist is None or dist < best_dist:
+                        best_bs, best_dist = int(bm.group(1)), dist
+            if best_bs is not None:
+                cfg["batch_size"] = best_bs
+            else:
+                m = _RE_BATCH_SIZE.search(text)
+                if m:
+                    cfg["batch_size"] = int(m.group(1))
+
+            # num_layers: only use standalone regex as fallback when the
+            # num_neighbors pattern didn't already give us the layer count.
+            # The standalone regex can falsely match MLP(... num_layers=1).
+            if not got_layers_from_neighbors:
+                model_pos = _RE_MODEL_INIT.search(text)
+                model_offset = model_pos.start() if model_pos else 0
+                best_nl, best_dist = None, None
+                for nm in _RE_NUM_LAYERS.finditer(text):
+                    if nm.start() >= model_offset and model_pos:
+                        dist = nm.start() - model_offset
+                        if best_dist is None or dist < best_dist:
+                            best_nl, best_dist = int(nm.group(1)), dist
+                if best_nl is not None:
+                    cfg["num_layers"] = best_nl
+                else:
+                    m = _RE_NUM_LAYERS.search(text)
+                    if m:
+                        cfg["num_layers"] = int(m.group(1))
+
             m = _RE_CHANNELS.search(text)
             if m:
                 cfg["channels"] = int(m.group(1))
@@ -336,6 +372,90 @@ def format_table(split, gen_metrics, author_metrics, gen_rows, author_rows, matc
               f"|{'Matched rows':<{w1}}|{str(matched_rows):^{w2}}|{'':^{w3}}|",
               sep]
     return "\n".join(lines)
+
+
+# ── Verdict ────────────────────────────────────────────────────────────────────
+def _compute_verdict(fairness_summary: dict, comparison_results: dict,
+                     splits: list) -> dict:
+    """Synthesize all signals into a trustworthiness verdict."""
+    issues = []
+    warnings = []
+
+    # --- Fairness signals ---
+    if fairness_summary:
+        if not fairness_summary.get("timestamp_ok", True):
+            issues.append("Timestamp mismatch — train/val/test splits differ between GenTask and AuthorTask")
+        if not fairness_summary.get("task_ok", True):
+            warnings.append("Task-definition mismatch (entity_col / target_col / timedelta)")
+
+        for split, cov in fairness_summary.get("coverage", {}).items():
+            if cov is None:
+                warnings.append(f"[{split}] Author table missing — cannot compute author metrics")
+            elif cov < 0.50:
+                issues.append(f"[{split}] Coverage {cov:.0%} — too few matched rows, author metrics unreliable")
+            elif cov < 0.70:
+                warnings.append(f"[{split}] Coverage {cov:.0%} — borderline, author metrics may have noise")
+
+    # --- Comparison signals ---
+    for split in splits:
+        sr = comparison_results.get(split, {})
+        if isinstance(sr, dict) and "error" in sr:
+            issues.append(f"[{split}] {sr['error']}")
+            continue
+
+        matched = sr.get("matched_rows", 0)
+        author  = sr.get("author_rows", 0)
+        if author > 0 and matched == 0:
+            issues.append(f"[{split}] Zero matched rows — comparison is meaningless")
+
+        am = sr.get("author_metrics", {})
+        if isinstance(am, dict) and "error" in am:
+            issues.append(f"[{split}] Author evaluation failed: {am['error']}")
+
+    # --- Determine trust level ---
+    if issues:
+        trust = "UNRELIABLE"
+    elif warnings:
+        trust = "TRUSTWORTHY_WITH_CAVEATS"
+    else:
+        trust = "TRUSTWORTHY"
+
+    return {
+        "trust_level": trust,
+        "issues": issues,
+        "warnings": warnings,
+    }
+
+
+def _print_verdict(verdict: dict, dataset: str, task: str):
+    trust = verdict["trust_level"]
+    issues = verdict["issues"]
+    warnings = verdict["warnings"]
+
+    _hdr(f"Verdict: {dataset} / {task}")
+
+    if trust == "TRUSTWORTHY":
+        print(f"\n  {GREEN}{BOLD}✅ TRUSTWORTHY{RESET}")
+        print(f"  {GREEN}The comparison results can be relied upon.")
+        print(f"  Timestamps match, task definitions align, and coverage is sufficient.{RESET}")
+    elif trust == "TRUSTWORTHY_WITH_CAVEATS":
+        print(f"\n  {YELLOW}{BOLD}⚠️  TRUSTWORTHY WITH CAVEATS{RESET}")
+        print(f"  {YELLOW}The comparison is usable but has minor concerns:{RESET}")
+        for w in warnings:
+            print(f"    {YELLOW}• {w}{RESET}")
+        print(f"\n  {YELLOW}GenTask metrics are reliable.")
+        print(f"  Author metrics may have minor deviations due to the above.{RESET}")
+    else:
+        print(f"\n  {RED}{BOLD}❌ UNRELIABLE{RESET}")
+        print(f"  {RED}The comparison should NOT be trusted due to:{RESET}")
+        for i in issues:
+            print(f"    {RED}• {i}{RESET}")
+        if warnings:
+            print(f"  {YELLOW}Additional warnings:{RESET}")
+            for w in warnings:
+                print(f"    {YELLOW}• {w}{RESET}")
+
+    print()
 
 
 # ── Main ───────────────────────────────────────────────────────────────────────
@@ -657,6 +777,10 @@ def main():
             "coverage":     round(cov, 4),
         }
 
+    # ── Final verdict ────────────────────────────────────────────────────
+    verdict = _compute_verdict(fairness_summary, comparison_results, splits)
+    _print_verdict(verdict, args.dataset, args.task)
+
     # ── Output JSON ──────────────────────────────────────────────────────
     output_data = {
         "session":          args.session,
@@ -666,6 +790,7 @@ def main():
         "fairness_summary": fairness_summary,
         "splits":           comparison_results,
         "training_results": training_results,
+        "verdict":          verdict,
     }
 
     if args.output:

@@ -235,7 +235,7 @@ STEP 3: Generate complete GenDataset class code
   - Class definition extending Dataset
   - val_timestamp = pd.Timestamp("YYYY-MM-DD") using value from Step 2
   - test_timestamp = pd.Timestamp("YYYY-MM-DD") using value from Step 2
-  - __init__ method accepting csv_dir and cache_dir parameters
+  - __init__(self, csv_dir, cache_dir=None) that passes cache_dir to super().__init__(cache_dir=cache_dir)
   - make_db() method that:
     * Loads all CSV files
     * Handles data cleaning (\\N → NaN, timezone stripping, type conversions)

@@ -68,6 +68,15 @@ def generate_training_script(
     else:
         csv_dir = os.path.abspath(csv_dir)
 
+    if not os.path.isdir(csv_dir):
+        return {
+            "status": "error",
+            "error": f"csv_dir does not exist: {csv_dir}. "
+                     f"Check that working_dir='{working_dir}' is correct.",
+        }
+
+    cache_dir = f"{working_dir}/cache/"
+
     if task_type == "link_prediction":
         script_template = _build_link_prediction_template(
             dataset_module_path=dataset_module_path,
@@ -76,6 +85,7 @@ def generate_training_script(
             task_class_name=task_class_name,
             working_dir=working_dir,
             csv_dir=csv_dir,
+            cache_dir=cache_dir,
             tune_metric=tune_metric,
             higher_is_better=higher_is_better,
             epochs=epochs,
@@ -168,7 +178,8 @@ except Exception as e:
 
 # --- Dataset & Task ---
 csv_dir = "{csv_dir}"
-dataset = {dataset_class_name}(csv_dir=csv_dir)
+cache_dir = "{cache_dir}"
+dataset = {dataset_class_name}(csv_dir=csv_dir, cache_dir=cache_dir)
 task = {task_class_name}(dataset)
 db = dataset.get_db()
 
@@ -196,7 +207,7 @@ data, col_stats_dict = make_pkey_fkey_graph(
     db,
     col_to_stype_dict=col_to_stype_dict,
     text_embedder_cfg=text_embedder_cfg,
-    cache_dir="{working_dir}/cache/",
+    cache_dir=cache_dir,
 )
 
 entity_table = task.entity_table
@@ -321,13 +332,19 @@ def _get_metric(metrics_dict, metric_name):
     return None
 
 # --- Training loop with checkpoint saving and early stopping ---
+enable_early_stopping = os.environ.get("PLEXE_EARLY_STOPPING", "false").lower() == "true"
 state_dict = None
 best_val_metric = -math.inf if higher_is_better else math.inf
 patience_counter = 0
-early_stop_patience = 5
+early_stop_patience = 8
 min_delta = 1e-6
 checkpoint_path = "{working_dir}/checkpoint.pt"
 epochs_configured = {epochs}
+
+if enable_early_stopping:
+    print(f"Early stopping ENABLED (patience={{early_stop_patience}}, min_delta={{min_delta}})")
+else:
+    print(f"Early stopping DISABLED (will run all {{epochs_configured}} epochs, keeping best model)")
 
 # Try to load checkpoint if exists (for recovery from crashes)
 if os.path.exists(checkpoint_path):
@@ -431,7 +448,10 @@ for epoch in range(start_epoch, epochs_configured + 1):
         print(f"  -> Checkpoint saved to {{checkpoint_path}}")
     else:
         patience_counter += 1
-        print(f"  -> No improvement (patience: {{patience_counter}}/{{early_stop_patience}})")
+        if enable_early_stopping:
+            print(f"  -> No improvement (patience: {{patience_counter}}/{{early_stop_patience}})")
+        else:
+            print(f"  -> No improvement")
 
         # Still save checkpoint for recovery (but not as best model)
         checkpoint = {{
@@ -444,7 +464,7 @@ for epoch in range(start_epoch, epochs_configured + 1):
         torch.save(checkpoint, checkpoint_path)
 
     # Early stopping check
-    if patience_counter >= early_stop_patience:
+    if enable_early_stopping and patience_counter >= early_stop_patience:
         print(f"Early stopping triggered! No improvement for {{early_stop_patience}} epochs")
         break
 
@@ -752,8 +772,8 @@ def execute_training_script(
     # Returning all of them as a tool result can exceed the LLM's token-per-minute
     # limit (e.g. 400K TPM for gpt-4.1-mini).  We keep the first few lines
     # (setup info, sample counts) and the last few (final metrics, errors).
-    MAX_STDOUT_LINES = 50
-    MAX_STDERR_LINES = 30
+    MAX_STDOUT_LINES = 80
+    MAX_STDERR_LINES = 80
 
     def _truncate_lines(lines, max_lines, label="output"):
         if len(lines) <= max_lines:
@@ -873,10 +893,23 @@ def execute_training_script(
             with open(results_path) as f:
                 training_results = json.load(f)
 
+        status = "success" if process.returncode == 0 else "failed"
+        stderr_text = "\n".join(_truncate_lines(stderr_lines, MAX_STDERR_LINES, "stderr"))
+        if process.returncode != 0 and process.returncode is not None:
+            signal_note = ""
+            if process.returncode < 0:
+                import signal as signal_mod
+                try:
+                    sig_name = signal_mod.Signals(-process.returncode).name
+                except (ValueError, AttributeError):
+                    sig_name = f"signal {-process.returncode}"
+                signal_note = f" (killed by {sig_name})"
+            stderr_text += f"\n\n[exit code: {process.returncode}{signal_note}]"
+
         return {
-            "status": "success" if process.returncode == 0 else "failed",
+            "status": status,
             "stdout": "\n".join(_truncate_lines(stdout_lines, MAX_STDOUT_LINES, "stdout")),
-            "stderr": "\n".join(_truncate_lines(stderr_lines, MAX_STDERR_LINES, "stderr")),
+            "stderr": stderr_text,
             "return_code": process.returncode,
             "training_results": training_results,
             "total_stdout_lines": len(stdout_lines),
@@ -929,6 +962,7 @@ def _build_link_prediction_template(
     task_class_name: str,
     working_dir: str,
     csv_dir: str,
+    cache_dir: str,
     tune_metric: str,
     higher_is_better: bool,
     epochs: int,
@@ -1024,7 +1058,8 @@ except Exception as e:
 
 # --- Dataset & Task ---
 csv_dir = "{csv_dir}"
-dataset = {dataset_class_name}(csv_dir=csv_dir)
+cache_dir = "{cache_dir}"
+dataset = {dataset_class_name}(csv_dir=csv_dir, cache_dir=cache_dir)
 task = {task_class_name}(dataset)
 db = dataset.get_db()
 
@@ -1051,7 +1086,7 @@ data, col_stats_dict = make_pkey_fkey_graph(
     db,
     col_to_stype_dict=col_to_stype_dict,
     text_embedder_cfg=text_embedder_cfg,
-    cache_dir="{working_dir}/cache/",
+    cache_dir=cache_dir,
 )
 
 # --- Link prediction config ---
@@ -1248,13 +1283,19 @@ def evaluate_link_prediction(model, data, split_table, task):
     return task.evaluate(pred, split_table)
 
 # --- Training loop with checkpoint saving and early stopping ---
+enable_early_stopping = os.environ.get("PLEXE_EARLY_STOPPING", "false").lower() == "true"
 state_dict = None
 best_val_metric = -math.inf if higher_is_better else math.inf
 patience_counter = 0
-early_stop_patience = 5
+early_stop_patience = 8
 min_delta = 1e-6
 checkpoint_path = "{working_dir}/checkpoint.pt"
 epochs_configured = {epochs}
+
+if enable_early_stopping:
+    print(f"Early stopping ENABLED (patience={{early_stop_patience}}, min_delta={{min_delta}})")
+else:
+    print(f"Early stopping DISABLED (will run all {{epochs_configured}} epochs, keeping best model)")
 
 if os.path.exists(checkpoint_path):
     try:
@@ -1339,7 +1380,10 @@ for epoch in range(start_epoch, epochs_configured + 1):
         print(f"  -> Checkpoint saved to {{checkpoint_path}}")
     else:
         patience_counter += 1
-        print(f"  -> No improvement (patience: {{patience_counter}}/{{early_stop_patience}})")
+        if enable_early_stopping:
+            print(f"  -> No improvement (patience: {{patience_counter}}/{{early_stop_patience}})")
+        else:
+            print(f"  -> No improvement")
 
         torch.save({{
             'epoch': epoch,
@@ -1349,7 +1393,7 @@ for epoch in range(start_epoch, epochs_configured + 1):
             'tune_metric': tune_metric,
         }}, checkpoint_path)
 
-    if patience_counter >= early_stop_patience:
+    if enable_early_stopping and patience_counter >= early_stop_patience:
         print(f"Early stopping triggered! No improvement for {{early_stop_patience}} epochs")
         break
 

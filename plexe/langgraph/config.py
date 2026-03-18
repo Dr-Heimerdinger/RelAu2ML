@@ -98,6 +98,9 @@ class AgentConfig:
     verbose: bool = field(default_factory=lambda: os.environ.get(
         "PLEXE_VERBOSE", "false"
     ).lower() == "true")
+    early_stopping: bool = field(default_factory=lambda: os.environ.get(
+        "PLEXE_EARLY_STOPPING", "false"
+    ).lower() == "true")
     
     @classmethod
     def from_env(cls) -> "AgentConfig":

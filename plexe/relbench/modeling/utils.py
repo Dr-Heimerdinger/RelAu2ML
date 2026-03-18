@@ -10,10 +10,14 @@ from ..base import Database, Table
 
 def to_unix_time(ser: pd.Series) -> np.ndarray:
     r"""Converts a :class:`pandas.Timestamp` series to UNIX timestamp (in seconds)."""
-    assert ser.dtype in [np.dtype("datetime64[s]"), np.dtype("datetime64[ns]")]
-    unix_time = ser.astype("int64").values
-    if ser.dtype == np.dtype("datetime64[ns]"):
-        unix_time //= 10**9
+    dtype_str = str(ser.dtype)
+    if not dtype_str.startswith("datetime64"):
+        raise TypeError(
+            f"Expected datetime64 dtype, got {ser.dtype}. "
+            "Convert with pd.to_datetime() first."
+        )
+    # Normalize to nanosecond resolution then convert to seconds
+    unix_time = ser.astype("datetime64[ns]").astype("int64").values // 10**9
     return unix_time
 
 

@@ -2,21 +2,14 @@
 \section{Giai Đoạn Khởi Tạo}
 % =========================================================
 
-Giai đoạn Khởi tạo chịu trách nhiệm thu thập thông tin đầu vào và xác thực yêu cầu của người dùng trước khi hệ thống chuyển sang các bước xử lý kỹ thuật tiếp theo.
+Giai đoạn Khởi tạo thu thập thông tin đầu vào và xác thực yêu cầu của người dùng trước khi hệ thống chuyển sang các bước xử lý kỹ thuật.
 
-\subsection{Tác Tử Giao Tiếp ($\mathcal{A}_{conv}$, Conversational Agent)}
+\subsection{Tác Tử Giao Tiếp ($\mathcal{A}_{conv}$)}
 
-Tác tử Giao tiếp $\mathcal{A}_{conv}$ là giao diện tương tác duy nhất giữa người dùng và hệ thống. Nhiệm vụ của tác tử là phân tích câu lệnh ngôn ngữ tự nhiên nhằm trích xuất ý định cốt lõi cùng các tham số kết nối dữ liệu cần thiết. Khác với các hệ thống AutoML truyền thống vốn yêu cầu người dùng cung cấp cấu hình kỹ thuật tường minh (tên bảng, cột mục tiêu, loại tác vụ), $\mathcal{A}_{conv}$ cho phép người dùng diễn đạt yêu cầu bằng ngôn ngữ tự nhiên --- ví dụ: \textit{``Tôi muốn dự đoán khách hàng nào sẽ rời bỏ dịch vụ trong 30 ngày tới''} --- và tự động suy luận thông tin kỹ thuật từ đó.
+$\mathcal{A}_{conv}$ là giao diện tương tác duy nhất giữa người dùng và hệ thống. Khác với các hệ thống AutoML truyền thống yêu cầu cấu hình kỹ thuật tường minh (tên bảng, cột mục tiêu, loại tác vụ), $\mathcal{A}_{conv}$ cho phép người dùng diễn đạt yêu cầu bằng ngôn ngữ tự nhiên --- ví dụ: \textit{``Tôi muốn dự đoán khách hàng nào sẽ rời bỏ dịch vụ trong 30 ngày tới''} --- và tự động suy luận thông tin kỹ thuật từ đó.
 
-\paragraph{Cơ chế hoạt động.}
-Quá trình tương tác được thực hiện thông qua một vòng lặp thu thập thông tin có kiểm tra (information-gathering loop), được mô tả như sau:
-
-\begin{enumerate}
-    \item $\mathcal{A}_{conv}$ tiếp nhận yêu cầu từ người dùng và đối chiếu với tập các trường thông tin bắt buộc $\mathcal{F} = \{f_1, f_2, \ldots, f_k\}$. System prompt của tác tử định nghĩa tường minh tập $\mathcal{F}$ bao gồm: nguồn dữ liệu (đường dẫn đến thư mục CSV hoặc chuỗi kết nối cơ sở dữ liệu), mô tả mục tiêu dự đoán, và xác nhận của người dùng.
-    \item Với mỗi trường $f_i \in \mathcal{F}$ còn thiếu, tác tử sinh câu hỏi làm rõ tương ứng và gửi lại người dùng. Đặc biệt, tác tử được hướng dẫn trong prompt nhận diện các trường hợp người dùng chưa rõ ràng --- ví dụ, phân biệt giữa đường dẫn tệp và mô tả dữ liệu --- để tránh hiểu sai ý định.
-    \item Vòng lặp kết thúc khi toàn bộ $\mathcal{F}$ được điền đầy đủ và người dùng xác nhận kế hoạch thực hiện (bao gồm tóm tắt ý định, loại dữ liệu, và mục tiêu dự đoán).
-    \item Kết quả được ghi vào $\mathcal{S}_{hist}$ (bảo toàn toàn bộ lịch sử hội thoại) và $\mathcal{S}_{spec}$ (cập nhật \texttt{user\_intent} và \texttt{data\_source}) để các giai đoạn sau truy xuất.
-\end{enumerate}
+\paragraph{Vòng lặp thu thập thông tin.}
+Tác tử duy trì một tập trường thông tin bắt buộc $\mathcal{F} = \{f_1, \ldots, f_k\}$ gồm: nguồn dữ liệu, mô tả mục tiêu dự đoán, và xác nhận của người dùng. Với mỗi trường $f_i$ còn thiếu, tác tử sinh câu hỏi làm rõ. Vòng lặp kết thúc khi toàn bộ $\mathcal{F}$ đầy đủ và người dùng xác nhận kế hoạch thực hiện. Kết quả được ghi vào $\mathcal{S}_{hist}$ và $\mathcal{S}_{spec}$ để các giai đoạn sau truy xuất.
 
 \paragraph{Cơ chế chuyển tiếp.}
-Sau khi $\mathcal{A}_{conv}$ hoàn tất, hàm định tuyến \texttt{route\_from\_conversation} kiểm tra ba điều kiện trước khi cho phép chuyển sang giai đoạn phân tích: (i) nguồn dữ liệu đã được xác định trong $\mathcal{S}_{spec}$, (ii) người dùng đã xác nhận kế hoạch, và (iii) không có trạng thái lỗi đang hoạt động. Nếu bất kỳ điều kiện nào không thỏa mãn, pipeline quay lại nút \texttt{conversation} để tiếp tục thu thập thông tin.
+Hàm định tuyến kiểm tra ba điều kiện trước khi chuyển sang giai đoạn phân tích: (i)~nguồn dữ liệu đã xác định, (ii)~người dùng đã xác nhận, và (iii)~không có lỗi đang hoạt động. Nếu bất kỳ điều kiện nào không thỏa mãn, pipeline quay lại nút giao tiếp để tiếp tục thu thập thông tin.
