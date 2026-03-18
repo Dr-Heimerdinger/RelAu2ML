@@ -16,6 +16,7 @@ import sys
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from scripts.task_registry import get_dataset_task_pairs
+from typing import Any
 
 
 def main():
@@ -34,6 +35,15 @@ def main():
                         help="Re-download even if parquet/csv already exists")
     parser.add_argument("--no-csv", action="store_true",
                         help="Skip saving CSV files (only save parquet)")
+    parser.add_argument(
+        "--no-prepared-download",
+        action="store_true",
+        help=(
+            "Do not use RelBench prepared dataset downloads. "
+            "If set, datasets will be instantiated from raw sources via local DatasetClass(). "
+            "Default: use prepared downloads when available."
+        ),
+    )
     args = parser.parse_args()
 
     splits = [s.strip() for s in args.splits.split(",")]
@@ -57,6 +67,13 @@ def main():
     skip_count = 0
     fail_count = 0
 
+    def _get_dataset_prepared(ds_name: str) -> Any:
+        # Use the upstream `relbench` package's prepared dataset cache/download.
+        # This matches the behavior of scripts like generate_relbench_sql_full.py.
+        from relbench.datasets import get_dataset as rb_get_dataset
+
+        return rb_get_dataset(ds_name, download=True)
+
     for ds_name, task_name, DatasetClass, TaskClass in pairs:
         print(f"--- {ds_name} / {task_name} ---")
 
@@ -77,8 +94,12 @@ def main():
             try:
                 # Instantiate dataset (cached)
                 if ds_name not in dataset_cache:
-                    print(f"  Instantiating {DatasetClass.__name__}...")
-                    dataset_cache[ds_name] = DatasetClass()
+                    if not args.no_prepared_download and ds_name.startswith("rel-"):
+                        print("  Loading prepared dataset via relbench.get_dataset(download=True)...")
+                        dataset_cache[ds_name] = _get_dataset_prepared(ds_name)
+                    else:
+                        print(f"  Instantiating {DatasetClass.__name__}...")
+                        dataset_cache[ds_name] = DatasetClass()
 
                 dataset = dataset_cache[ds_name]
                 task = TaskClass(dataset)
