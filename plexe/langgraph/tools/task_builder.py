@@ -955,6 +955,13 @@ def register_task_code(
         logging.warning(f"Generated code has syntax error: {e}")
         syntax_warnings.append(f"Syntax error at line {e.lineno}: {e.msg}")
 
+    if task_type == "link_prediction" and "EntityTask" in sanitized_code and "RecommendationTask" not in sanitized_code:
+        return {
+            "status": "error",
+            "error": "Link prediction task must inherit RecommendationTask, not EntityTask. "
+                     "Fix the class declaration and re-register.",
+        }
+
     if task_type == "link_prediction" and "eval_k" not in sanitized_code:
         import re
         import logging

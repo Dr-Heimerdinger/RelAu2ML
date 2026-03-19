@@ -612,6 +612,15 @@ def main():
     gen_task    = GenTask(gen_dataset)
     db          = gen_dataset.get_db()
 
+    if not isinstance(gen_task, RecommendationTask):
+        print(
+            f"Error: GenTask in {session_path} is "
+            f"{type(gen_task).__bases__[0].__name__}, not RecommendationTask. "
+            f"The Agent generated an entity task for a link-prediction task. "
+            f"Re-run the Agent session to regenerate task.py as a RecommendationTask."
+        )
+        sys.exit(1)
+
     src_entity_table = gen_task.src_entity_table
     dst_entity_table = gen_task.dst_entity_table
     eval_k           = gen_task.eval_k

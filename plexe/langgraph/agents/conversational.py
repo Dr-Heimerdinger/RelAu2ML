@@ -159,6 +159,7 @@ class ConversationalAgent(BaseAgent):
             "recommend", "which items", "list of", "purchase list",
             "map@", "precision@", "recall@", "link prediction",
             "mean average precision",
+            "in which", "which races", "will compete",
         ]
         regression_keywords = [
             "sum", "total", "sales", "revenue", "amount", "count",
@@ -199,14 +200,12 @@ class ConversationalAgent(BaseAgent):
                     intent["evaluation_metric"] = metric_name
                     break
 
-            # Check classification FIRST (more specific keywords override ambiguous ones)
-            if any(_match(kw, content_lower) for kw in classification_keywords):
-                intent["task_type"] = "binary_classification"
-            elif any(_match(kw, content_lower) for kw in link_prediction_keywords):
+            if any(_match(kw, content_lower) for kw in link_prediction_keywords):
                 intent["task_type"] = "link_prediction"
+            elif any(_match(kw, content_lower) for kw in classification_keywords):
+                intent["task_type"] = "binary_classification"
             elif any(_match(kw, content_lower) for kw in regression_keywords):
                 intent["task_type"] = "regression"
-            # else: keep default "binary_classification"
             break
 
         return intent
