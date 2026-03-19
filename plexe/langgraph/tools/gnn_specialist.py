@@ -1112,7 +1112,6 @@ train_loader = LinkNeighborLoader(
     dst_nodes=train_table_input.dst_nodes,
     num_dst_nodes=train_table_input.num_dst_nodes,
     src_time=train_table_input.src_time,
-    time_attr="time",
     temporal_strategy="uniform",
     batch_size={batch_size},
     shuffle=True,

@@ -389,26 +389,42 @@ You CANNOT proceed without dataset.py. Report this error.
                         expected_type = "regression"
                     elif metric in binary_metrics:
                         expected_type = "binary_classification"
-            task_info["task_type"] = expected_type
-
             # Validate: the generated file's task_type must match the
             # user's intent.  If the LLM wrote the wrong type, flag an
             # error so the retry loop can fix it.
             file_type = self._read_task_type_from_file(task_path)
+            task_info["task_type"] = file_type or expected_type
             if file_type and file_type != expected_type:
-                mismatch_msg = (
-                    f"Task type mismatch: user intent is '{expected_type}' "
-                    f"(metric: {intent.get('evaluation_metric', 'N/A') if isinstance(intent, dict) else 'N/A'}) "
-                    f"but generated task.py uses '{file_type}'. "
-                    f"Deleting task.py to force a retry with the correct type."
-                )
-                logger.error(mismatch_msg)
-                # Remove the bad file so the retry loop detects it as missing
-                os.remove(task_path)
-                base_result["active_errors"] = [mismatch_msg]
-                base_result["error_history"] = [mismatch_msg]
-                base_result["current_phase"] = PipelinePhase.TASK_BUILDING.value
-                return base_result
+                # `average_precision` is ambiguous: it can mean AP for binary
+                # classification or MAP/link_prediction_map for link prediction.
+                # When the generated task is clearly LINK_PREDICTION, don't
+                # delete it purely due to that ambiguity.
+                if (
+                    expected_type == "binary_classification"
+                    and file_type == "link_prediction"
+                    and isinstance(intent, dict)
+                    and str(intent.get("evaluation_metric", "")).strip().lower()
+                    in {"average_precision", "ap"}
+                ):
+                    logger.warning(
+                        "Ambiguous evaluation_metric=%s: keeping LINK_PREDICTION task.py "
+                        "instead of forcing binary_classification retry.",
+                        intent.get("evaluation_metric"),
+                    )
+                else:
+                    mismatch_msg = (
+                        f"Task type mismatch: user intent is '{expected_type}' "
+                        f"(metric: {intent.get('evaluation_metric', 'N/A') if isinstance(intent, dict) else 'N/A'}) "
+                        f"but generated task.py uses '{file_type}'. "
+                        f"Deleting task.py to force a retry with the correct type."
+                    )
+                    logger.error(mismatch_msg)
+                    # Remove the bad file so the retry loop detects it as missing
+                    os.remove(task_path)
+                    base_result["active_errors"] = [mismatch_msg]
+                    base_result["error_history"] = [mismatch_msg]
+                    base_result["current_phase"] = PipelinePhase.TASK_BUILDING.value
+                    return base_result
 
             base_result["task_info"] = task_info
             base_result["current_phase"] = PipelinePhase.GNN_TRAINING.value

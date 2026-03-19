@@ -99,7 +99,7 @@ Data loading:
   # table_input has: .src_nodes, .dst_nodes, .num_dst_nodes, .src_time
   train_loader = LinkNeighborLoader(data, num_neighbors=..., src_nodes=table_input.src_nodes,
       dst_nodes=table_input.dst_nodes, num_dst_nodes=table_input.num_dst_nodes,
-      src_time=table_input.src_time, time_attr="time", batch_size=..., shuffle=True, num_workers=0)
+      src_time=table_input.src_time, batch_size=..., shuffle=True, num_workers=0)
   # Each batch yields: (src_batch, pos_dst_batch, neg_dst_batch) — 3 HeteroData objects
 
 Training:
