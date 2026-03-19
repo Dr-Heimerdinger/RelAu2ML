@@ -1,4 +1,4 @@
-I am working with the data is loaded into the `stack` database (connection string: `postgresql+psycopg2://mlflow:mlflow@postgres:5432/stack`).
+I am working with the data is loaded into the `stack_full` database (connection string: `postgresql+psycopg2://mlflow:mlflow@postgres:5432/stack_full`).
 I want to define a predictive task on this relational database.
 - Database Description: Stack Exchange is a network of question-and-answer websites on topics in diverse fields, each site covering a specific topic, where questions, answers, and users are subject to a reputation award process. The reputation system allows the sites to be self-moderating
 - Task definition:Predict a list of existing posts that users will link a given post to in the next two years.

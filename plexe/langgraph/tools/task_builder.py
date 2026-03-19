@@ -440,11 +440,18 @@ def analyze_task_structure(
 
         # Link prediction: highest priority
         if is_link_task:
+            link_reason = "Link prediction keywords detected. Use LEFT JOIN event table + LIST(DISTINCT)."
+            if has_creation_date:
+                link_reason += (
+                    f" IMPORTANT: Entity table '{entity_table}' has creation date column "
+                    f"'{entity_creation_col}'. You MUST add LEFT JOIN + "
+                    f"{entity_creation_col} <= t.timestamp to gate entity inclusion."
+                )
             candidates.append({
                 "pattern": "Link",
                 "confidence": 0.95,
                 "lookback": None,
-                "reason": "Link prediction keywords detected. Use LEFT JOIN event table + LIST(DISTINCT).",
+                "reason": link_reason,
             })
 
         # Churn/absence: second priority
@@ -562,6 +569,52 @@ def analyze_task_structure(
 
         _has_categorical = bool(event_cat_profiles or entity_cat_profiles)
 
+        # ---- Creation date gate detection for link prediction ----
+        # Scan entity table AND potential join tables for creation date columns.
+        # This is critical for link prediction: entities that don't yet exist at
+        # the prediction timestamp must be excluded.
+        _creation_date_gate = []
+        if is_link_task:
+            # Already detected for the primary entity_table
+            if has_creation_date and entity_table:
+                _creation_date_gate.append({
+                    "table": entity_table,
+                    "creation_date_column": entity_creation_col,
+                })
+            # Also scan potential join tables (they may be src/dst entity tables)
+            creation_signals = [
+                'creation', 'created', 'start_date', 'publish',
+                'registered', 'signup', 'join_date', 'enrollment',
+                'opened', 'open_date', 'released', 'launched',
+                'listed', 'added_date', 'available',
+            ]
+            for jt_info in potential_join_tables:
+                jt_name = jt_info["table"]
+                if jt_name == entity_table:
+                    continue
+                try:
+                    jt_file = os.path.join(csv_dir, f"{jt_name}.csv")
+                    if not os.path.exists(jt_file):
+                        continue
+                    jt_sample = pd.read_csv(jt_file, nrows=100)
+                    for col in jt_sample.columns:
+                        col_lower = col.lower()
+                        if col_lower.endswith('id') or col_lower == 'id':
+                            continue
+                        if any(sig in col_lower for sig in creation_signals):
+                            try:
+                                parsed = pd.to_datetime(jt_sample[col], errors='coerce')
+                                if parsed.notna().sum() > len(jt_sample) * 0.3:
+                                    _creation_date_gate.append({
+                                        "table": jt_name,
+                                        "creation_date_column": col,
+                                    })
+                                    break
+                            except Exception:
+                                pass
+                except Exception:
+                    pass
+
         building_blocks = {
             "needs_cte": _needs_cte,
             "needs_nested_join": _needs_nested_join,
@@ -587,6 +640,9 @@ def analyze_task_structure(
                 "Also check schema_hints.sentinel_warnings for entity ID sentinel values to exclude."
                 if (_has_categorical or sentinel_warnings)
                 else None
+            ),
+            "creation_date_gate": (
+                _creation_date_gate if _creation_date_gate else None
             ),
         }
 

@@ -239,7 +239,9 @@ GROUP BY t.timestamp, entity.id
 
 For binary targets, replace the COALESCE(AGG(...), 0) with a CASE WHEN expression.
 
-### Link Prediction Pattern
+### Link Prediction Pattern (Basic)
+
+Use when events directly contain src and dst entity IDs and no entity table has a creation date to gate inclusion.
 
 Entity source: event table via LEFT JOIN with `timestamp_df`.
 
@@ -256,11 +258,67 @@ WHERE ev.src_entity_id IS NOT NULL AND ev.dst_entity_id IS NOT NULL
 GROUP BY t.timestamp, ev.src_entity_id
 ```
 
+### Link Prediction + CreationDate Gate
+
+Use when `analyze_task_structure()` reports `building_blocks.creation_date_gate` with entity tables that have a creation/start/publish date. Both src and dst entities must exist (creation_date <= t.timestamp) BEFORE the prediction window opens. This is the most common link prediction pattern in practice.
+
+**Variant A -- Direct event table (src entity joins through event FK)**
+
+When the event table has both src and dst entity FKs, and either or both entity tables have creation dates:
+
+```sql
+SELECT
+    t.timestamp,
+    ev.src_entity_id,
+    LIST(DISTINCT ev.dst_entity_id) AS dst_entity_id
+FROM timestamp_df t
+LEFT JOIN event_table ev
+    ON ev.time_col > t.timestamp
+   AND ev.time_col <= t.timestamp + INTERVAL '{self.timedelta}'
+LEFT JOIN src_entity_table s_ent
+    ON ev.src_entity_id = s_ent.id
+LEFT JOIN dst_entity_table d_ent
+    ON ev.dst_entity_id = d_ent.id
+WHERE ev.src_entity_id IS NOT NULL
+  AND ev.dst_entity_id IS NOT NULL
+  AND s_ent.creation_date <= t.timestamp
+  AND d_ent.creation_date <= t.timestamp
+GROUP BY t.timestamp, ev.src_entity_id
+```
+
+If only dst entity has a creation date (src entity has no creation date or src IS the event table entity), omit the `s_ent` join and its filter. Vice versa if only src has a creation date.
+
+**Variant B -- Junction table (src->junction->dst)**
+
+When source and destination entities connect through a junction/bridge table (e.g., postLinks connecting posts, condition_study connecting conditions to sponsors):
+
+```sql
+SELECT
+    t.timestamp,
+    jt.src_entity_id,
+    LIST(DISTINCT jt.dst_entity_id) AS dst_entity_id
+FROM timestamp_df t
+LEFT JOIN junction_table jt
+    ON jt.time_col > t.timestamp
+   AND jt.time_col <= t.timestamp + INTERVAL '{self.timedelta}'
+LEFT JOIN src_entity_table s_ent
+    ON jt.src_entity_id = s_ent.id
+LEFT JOIN dst_entity_table d_ent
+    ON jt.dst_entity_id = d_ent.id
+WHERE jt.src_entity_id IS NOT NULL
+  AND jt.dst_entity_id IS NOT NULL
+  AND s_ent.creation_date <= t.timestamp
+  AND d_ent.creation_date <= t.timestamp
+GROUP BY t.timestamp, jt.src_entity_id
+```
+
+**Decision rule for CreationDate gate**: Check `building_blocks.creation_date_gate` from `analyze_task_structure()`. If it reports entity tables with creation dates, you MUST add the corresponding LEFT JOIN + creation_date filter. This prevents predicting links to/from entities that do not yet exist at the prediction timestamp.
+
 ### Pattern Selection Decision Tree
 
-Apply in this order (first match wins):
+Apply in this order:
 
-1. Is the output a list of destination entities? -- use **Link Prediction**
+1. Is the output a list of destination entities? -- use **Link Prediction** as the base pattern. Then check: does `building_blocks.creation_date_gate` report entity tables with creation dates? If yes, compose with **CreationDate Gate** (see "Link + CreationDate Gate" above). Also check `schema_hints.sentinel_warnings` and `schema_hints.categorical_columns` for additional filters.
 2. Is the task about behavioral absence (churn, inactive, retention, lapse)? -- use **Pattern A**
 3. Does the entity table have a creation/start/publish date that should gate inclusion? -- use **Pattern D**
 4. Should every entity get a prediction row, even with zero target? -- use **Pattern C**
@@ -375,11 +433,11 @@ Use when: task conditions on prior behavior ("if they attended before", "repeat 
 
 ### Composition Examples
 
-1. **CTE + Pattern D** (entities with start dates): CTE preprocesses event tables; main LEFT JOIN filters ON creation_date <= timestamp.
-2. **Nested LEFT JOIN + HAVING** (entity-event pre-join with gate): entity LEFT JOIN event stream; HAVING SUM(target) > 0.
-3. **Link + Quality Filter** (high-quality events only): Base Link + WHERE clause on event attribute (e.g., rating, status).
-4. **Link + Chained JOIN** (source→junction→destination): temporal filter on junction table.
-5. **Link + Creation Date** (entity must exist before prediction time): LEFT JOIN entity ON creation_date <= t.timestamp, then LEFT JOIN events for temporal window.
+1. **Link + CreationDate Gate** (MOST COMMON for link prediction): Base Link pattern + LEFT JOIN src/dst entity tables ON creation_date <= t.timestamp. Ensures only entities that existed before the prediction window are included. Check `building_blocks.creation_date_gate` from `analyze_task_structure()`.
+2. **Link + Quality Filter** (high-quality events only): Base Link + WHERE clause on event attribute (e.g., rating, status).
+3. **Link + Chained JOIN + CreationDate** (junction table with creation gating): temporal filter on junction table + LEFT JOIN both endpoint entity tables with creation_date filter.
+4. **CTE + Pattern D** (entities with start dates): CTE preprocesses event tables; main LEFT JOIN filters ON creation_date <= timestamp.
+5. **Nested LEFT JOIN + HAVING** (entity-event pre-join with gate): entity LEFT JOIN event stream; HAVING SUM(target) > 0.
 
 ### Detailed Composition: CTE UNION + CROSS JOIN + Activity Filter (Multi-Source Engagement)
 
@@ -669,30 +727,24 @@ class GenTask(EntityTask):
         )
 ```
 
-### Template: Link Prediction
+### Template: Link Prediction (Basic -- no entity creation date)
 
 ```python
-# Replace these with your dataset's actual names (verified via get_csv_files_info()):
-# src_entity_table → exact CSV filename for source entities (e.g., "customers", "users")
-# src_id           → exact source entity column name (e.g., "customer_id", "user_id")
-# dst_entity_table → exact CSV filename for destination entities (e.g., "articles", "products")
-# dst_id           → exact destination entity column name (e.g., "article_id", "product_id")
-# event_table      → the event/fact table name (e.g., "transactions", "interactions")
-# event_time       → exact timestamp column name in the event table
+# Use when building_blocks.creation_date_gate is absent or empty.
 import pandas as pd
 from plexe.relbench.base import Database, RecommendationTask, Table, TaskType
 from plexe.relbench.metrics import link_prediction_precision, link_prediction_recall, link_prediction_map
 
 class GenTask(RecommendationTask):
     task_type = TaskType.LINK_PREDICTION
-    src_entity_col = "src_id"           # exact column name from CSV
-    src_entity_table = "src_entity_table"  # exact CSV filename without .csv
-    dst_entity_col = "dst_id"           # exact column name from CSV
-    dst_entity_table = "dst_entity_table"  # exact CSV filename without .csv
+    src_entity_col = "src_id"
+    src_entity_table = "src_entity_table"
+    dst_entity_col = "dst_id"
+    dst_entity_table = "dst_entity_table"
     time_col = "timestamp"
     timedelta = pd.Timedelta(days=7)
     metrics = [link_prediction_precision, link_prediction_recall, link_prediction_map]
-    eval_k = 10  # adjust to expected positive links per entity
+    eval_k = 10
 
     def make_table(self, db: Database, timestamps: "pd.Series[pd.Timestamp]") -> Table:
         import duckdb
@@ -710,6 +762,67 @@ class GenTask(RecommendationTask):
                 ON ev.event_time > t.timestamp
                AND ev.event_time <= t.timestamp + INTERVAL '{self.timedelta}'
             WHERE ev.src_id IS NOT NULL AND ev.dst_id IS NOT NULL
+            GROUP BY t.timestamp, ev.src_id
+        \"\"\").df()
+        return Table(
+            df=df,
+            fkey_col_to_pkey_table={
+                self.src_entity_col: self.src_entity_table,
+                self.dst_entity_col: self.dst_entity_table,
+            },
+            pkey_col=None,
+            time_col=self.time_col,
+        )
+```
+
+### Template: Link Prediction + CreationDate Gate
+
+```python
+# Use when building_blocks.creation_date_gate lists entity tables with creation dates.
+# Add LEFT JOIN + creation_date filter for each reported entity table.
+# The example below gates BOTH src and dst entities; omit one if only the other has a creation date.
+import pandas as pd
+from plexe.relbench.base import Database, RecommendationTask, Table, TaskType
+from plexe.relbench.metrics import link_prediction_precision, link_prediction_recall, link_prediction_map
+
+class GenTask(RecommendationTask):
+    task_type = TaskType.LINK_PREDICTION
+    src_entity_col = "src_id"
+    src_entity_table = "src_entity_table"
+    dst_entity_col = "dst_id"
+    dst_entity_table = "dst_entity_table"
+    time_col = "timestamp"
+    timedelta = pd.Timedelta(days=91)
+    metrics = [link_prediction_precision, link_prediction_recall, link_prediction_map]
+    eval_k = 10
+
+    def make_table(self, db: Database, timestamps: "pd.Series[pd.Timestamp]") -> Table:
+        import duckdb
+        timestamp_df = pd.DataFrame({"timestamp": timestamps})
+        event_table = db.table_dict["event_table"].df
+        src_entity_table = db.table_dict["src_entity_table"].df
+        dst_entity_table = db.table_dict["dst_entity_table"].df
+        duckdb.register("timestamp_df", timestamp_df)
+        duckdb.register("event_table", event_table)
+        duckdb.register("src_entity_table", src_entity_table)
+        duckdb.register("dst_entity_table", dst_entity_table)
+        df = duckdb.sql(f\"\"\"
+            SELECT
+                t.timestamp,
+                ev.src_id,
+                LIST(DISTINCT ev.dst_id) AS dst_id
+            FROM timestamp_df t
+            LEFT JOIN event_table ev
+                ON ev.event_time > t.timestamp
+               AND ev.event_time <= t.timestamp + INTERVAL '{self.timedelta}'
+            LEFT JOIN src_entity_table s_ent
+                ON ev.src_id = s_ent.id
+            LEFT JOIN dst_entity_table d_ent
+                ON ev.dst_id = d_ent.id
+            WHERE ev.src_id IS NOT NULL
+              AND ev.dst_id IS NOT NULL
+              AND s_ent.creation_date <= t.timestamp
+              AND d_ent.creation_date <= t.timestamp
             GROUP BY t.timestamp, ev.src_id
         \"\"\").df()
         return Table(
@@ -788,6 +901,7 @@ Must EXACTLY match the table key used in `db.table_dict`. This is the CSV filena
 12. **Table name casing**: `entity_table` must match the key in `db.table_dict` exactly. If the dataset uses `"UserInfo"` as the table key, you must write `entity_table = "UserInfo"`, not `"userinfo"`.
 13. **Empty eval tables / -inf metrics**: Always check `recommended_num_eval_timestamps` from `analyze_task_structure()`. If it says 40, you MUST set `num_eval_timestamps = 40`. Without it, sparse/seasonal data produces empty val/test tables → 0 predictions → -inf metrics. This is the #1 cause of silent training failures.
 14. **Missing categorical filters**: When entity or event tables have low-cardinality "type" columns (PostTypeId, VoteTypeId, StatusId, outcome_type), failing to filter by the relevant type produces a training table with mixed entity/event subtypes and inflated row counts. Always check `schema_hints.categorical_columns` from `analyze_task_structure()` and add WHERE filters for the task-relevant values. Also check `schema_hints.sentinel_warnings` for entity ID sentinel values (-1, NULL) that should be excluded.
+15. **Missing CreationDate gate in link prediction**: When `building_blocks.creation_date_gate` reports entity tables with creation dates, you MUST add LEFT JOIN + `creation_date <= t.timestamp` filters to ensure only entities that existed before the prediction window are included. Without this, the model predicts links to/from entities that do not yet exist, producing inflated row counts and mismatched training tables vs author ground truth.
 
 ---
 

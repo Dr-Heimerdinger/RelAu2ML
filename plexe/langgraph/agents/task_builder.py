@@ -289,6 +289,7 @@ You CANNOT proceed without dataset.py. Report this error.
    - temporal.suggested_lookback_interval (use this for Pattern B lookback value)
    - pattern_candidates (ranked suggestions -- use as guidance, not as absolute rule)
    - building_blocks (whether CTE, nested JOIN, quality filter, or HAVING is needed)
+   - building_blocks.creation_date_gate (for link prediction: entity tables with creation dates that MUST gate inclusion)
    - schema_hints.potential_join_tables (tables that share columns with the event table)
    - schema_hints.categorical_columns (low-cardinality type columns that may need WHERE filters — check if any match the task semantics)
    - schema_hints.sentinel_warnings (entity ID sentinel values like -1 or NULL to exclude)
@@ -298,6 +299,7 @@ You CANNOT proceed without dataset.py. Report this error.
    - Nested LEFT JOIN: for entity-event pre-join patterns
    - Chained JOIN: for link prediction through junction tables
    - Quality/categorical filters: for type columns, rating/status conditions, sentinel exclusion
+   - CreationDate gate: for link prediction when entity tables have creation/start dates (LEFT JOIN entity ON creation_date <= t.timestamp)
 7. Choose appropriate metrics based on task type
 8. For link prediction: set eval_k (typical: 10-12)
 9. Test your SQL: test_sql_query("{csv_dir}", query)
@@ -323,6 +325,7 @@ You CANNOT proceed without dataset.py. Report this error.
 - If data range is narrow (< 3 months) or data_range/timedelta < 5, set num_eval_timestamps = 40
 - When analyze_task_structure() reports categorical_columns, check if any match the task semantics and add WHERE filters for relevant values (e.g., PostTypeId=1 for questions, VoteTypeId=2 for upvotes)
 - When sentinel_warnings are reported, add filters to exclude sentinel entity IDs (e.g., WHERE entity_id != -1 AND entity_id IS NOT NULL)
+- For LINK_PREDICTION: when building_blocks.creation_date_gate reports entity tables with creation dates, you MUST add LEFT JOIN + creation_date <= t.timestamp for those entities to prevent predicting links to/from non-existent entities
 """)
         
         return "\n".join(context_parts)

@@ -64,27 +64,18 @@ def _info(msg): print(f"     {msg}")
 def _hdr(msg):  print(f"\n{BOLD}{'─'*58}\n{msg}\n{'─'*58}{RESET}")
 
 
-# ── Two-tower link-prediction model (mirrors gnn_link.py) ────────────────────
-class ShallowEmbedding(torch.nn.Module):
-    """Per-node learnable embedding for ID-aware link prediction."""
+# ── Link-prediction model (matches training template from gnn_specialist.py) ──
+class LinkModel(torch.nn.Module):
+    """Unified link-prediction model with configurable head output dimension.
 
-    def __init__(self, num_nodes: int, channels: int):
-        super().__init__()
-        self.emb = torch.nn.Embedding(num_nodes, channels)
-        torch.nn.init.normal_(self.emb.weight, std=0.1)
-
-    def forward(self, idx: torch.Tensor) -> torch.Tensor:
-        return self.emb(idx)
-
-    def reset_parameters(self):
-        torch.nn.init.normal_(self.emb.weight, std=0.1)
-
-
-class IdGNNModel(torch.nn.Module):
-    """ID-GNN model for link prediction (per-source scoring)."""
+    When out_channels == channels (embedding mode), inference uses dot-product
+    scoring against all destination node embeddings.
+    When out_channels == num_dst_nodes (idgnn mode), the head directly outputs
+    logits for all destination nodes.
+    """
 
     def __init__(self, data, col_stats_dict, num_layers, channels,
-                 num_src_nodes, num_dst_nodes):
+                 out_channels):
         super().__init__()
         self.encoder = HeteroEncoder(
             channels=channels,
@@ -104,8 +95,9 @@ class IdGNNModel(torch.nn.Module):
             aggr="sum",
             num_layers=num_layers,
         )
-        self.head = MLP(channels, out_channels=num_dst_nodes,
+        self.head = MLP(channels, out_channels=out_channels,
                         norm="batch_norm", num_layers=1)
+        self.out_channels = out_channels
         self.reset_parameters()
 
     def reset_parameters(self):
@@ -113,52 +105,6 @@ class IdGNNModel(torch.nn.Module):
         self.temporal_encoder.reset_parameters()
         self.gnn.reset_parameters()
         self.head.reset_parameters()
-
-    def forward(self, batch, src_entity_table):
-        seed_time = batch[src_entity_table].seed_time
-        x_dict = self.encoder(batch.tf_dict)
-        rel_time_dict = self.temporal_encoder(
-            seed_time, batch.time_dict, batch.batch_dict
-        )
-        for nt, rt in rel_time_dict.items():
-            x_dict[nt] = x_dict[nt] + rt
-        x_dict = self.gnn(
-            x_dict, batch.edge_index_dict,
-            batch.num_sampled_nodes_dict,
-            batch.num_sampled_edges_dict,
-        )
-        return self.head(x_dict[src_entity_table][:seed_time.size(0)])
-
-
-class TwoTowerModel(torch.nn.Module):
-    """Two-tower GNN model for link prediction (inner-product scoring)."""
-
-    def __init__(self, data, col_stats_dict, num_layers, channels):
-        super().__init__()
-        self.encoder = HeteroEncoder(
-            channels=channels,
-            node_to_col_names_dict={
-                nt: data[nt].tf.col_names_dict for nt in data.node_types
-            },
-            node_to_col_stats=col_stats_dict,
-        )
-        self.temporal_encoder = HeteroTemporalEncoder(
-            node_types=[nt for nt in data.node_types if "time" in data[nt]],
-            channels=channels,
-        )
-        self.gnn = HeteroGraphSAGE(
-            node_types=data.node_types,
-            edge_types=data.edge_types,
-            channels=channels,
-            aggr="sum",
-            num_layers=num_layers,
-        )
-        self.reset_parameters()
-
-    def reset_parameters(self):
-        self.encoder.reset_parameters()
-        self.temporal_encoder.reset_parameters()
-        self.gnn.reset_parameters()
 
     def forward(self, batch, entity_table):
         seed_time = batch[entity_table].seed_time
@@ -173,7 +119,15 @@ class TwoTowerModel(torch.nn.Module):
             batch.num_sampled_nodes_dict,
             batch.num_sampled_edges_dict,
         )
-        return x_dict[entity_table][:seed_time.size(0)]
+        return self.head(x_dict[entity_table][:seed_time.size(0)])
+
+
+def _detect_head_out_channels(state_dict: dict) -> int:
+    """Detect the output dimension of head MLP from state_dict keys."""
+    for key in sorted(state_dict.keys(), reverse=True):
+        if key.startswith("head.") and (key.endswith(".weight") or key.endswith(".0.weight")):
+            return state_dict[key].shape[0]
+    return 0
 
 
 # ── Hyper-param config reader ──────────────────────────────────────────────────
@@ -300,7 +254,7 @@ def load_session_modules(session_path):
 # ── Link-prediction inference ─────────────────────────────────────────────────
 def run_link_inference_idgnn(model, loader, device, src_entity_table,
                              num_dst_nodes, eval_k):
-    """Run inference with ID-GNN model: output is (N, eval_k) top-k dst indices."""
+    """ID-GNN path: head outputs (batch, num_dst_nodes) logits directly."""
     model.eval()
     all_topk = []
     with torch.no_grad():
@@ -314,18 +268,52 @@ def run_link_inference_idgnn(model, loader, device, src_entity_table,
     return torch.cat(all_topk, dim=0).numpy()
 
 
-def run_link_inference_twotower(src_model, loader, device,
-                                src_entity_table, dst_entity_table,
-                                dst_emb, eval_k):
-    """Run inference with two-tower model: inner-product scoring."""
-    src_model.eval()
+def _compute_all_dst_embeddings(model, data, dst_entity_table, device,
+                                num_dst_nodes, num_neighbors, num_layers):
+    """Compute embeddings for ALL destination nodes using NeighborLoader."""
+    from torch_geometric.loader import NeighborLoader
+    dst_seed_time = data[dst_entity_table].time[:num_dst_nodes]
+    dst_loader = NeighborLoader(
+        data,
+        num_neighbors=num_neighbors,
+        input_nodes=(dst_entity_table, torch.arange(num_dst_nodes)),
+        input_time=dst_seed_time,
+        batch_size=512,
+        shuffle=False,
+        time_attr="time",
+    )
+    model.eval()
+    all_embs = []
+    with torch.no_grad():
+        for batch in dst_loader:
+            batch = batch.to(device)
+            emb = model(batch, dst_entity_table)
+            all_embs.append(emb.cpu())
+    return torch.cat(all_embs, dim=0)
+
+
+def run_link_inference_embedding(model, loader, device, src_entity_table,
+                                 all_dst_emb, eval_k, chunk_size=512):
+    """Embedding path: dot-product scoring src_emb @ all_dst_emb.T, chunked."""
+    model.eval()
     all_topk = []
+    all_dst_emb = all_dst_emb.to(device)
     with torch.no_grad():
         for batch in loader:
             batch = batch.to(device)
-            src_embs = src_model(batch, src_entity_table)
-            scores = src_embs @ dst_emb.T
-            topk = scores.topk(eval_k, dim=1).indices
+            src_embs = model(batch, src_entity_table)
+            topk_vals = []
+            topk_idxs = []
+            for i in range(0, all_dst_emb.size(0), chunk_size):
+                chunk = all_dst_emb[i:i + chunk_size]
+                scores = src_embs @ chunk.T
+                vals, idxs = scores.topk(min(eval_k, scores.size(1)), dim=1)
+                topk_vals.append(vals)
+                topk_idxs.append(idxs + i)
+            all_vals = torch.cat(topk_vals, dim=1)
+            all_idxs = torch.cat(topk_idxs, dim=1)
+            _, final_idx = all_vals.topk(eval_k, dim=1)
+            topk = all_idxs.gather(1, final_idx)
             all_topk.append(topk.cpu())
     if not all_topk:
         return np.array([]).reshape(0, eval_k)
@@ -737,31 +725,34 @@ def main():
             persistent_workers=False,
         )
 
-    # Build model
-    model_type = cfg["model_type"]
-    if model_type == "idgnn":
-        model = IdGNNModel(
-            data=data,
-            col_stats_dict=col_stats_dict,
-            num_layers=cfg["num_layers"],
-            channels=cfg["channels"],
-            num_src_nodes=gen_task.num_src_nodes,
-            num_dst_nodes=num_dst_nodes,
-        ).to(device)
-    elif model_type == "twotower":
-        model = TwoTowerModel(
-            data=data,
-            col_stats_dict=col_stats_dict,
-            num_layers=cfg["num_layers"],
-            channels=cfg["channels"],
-        ).to(device)
-    else:
-        print(f"Error: Unknown model_type '{model_type}'. Must be 'idgnn' or 'twotower'.")
-        sys.exit(1)
-
+    # Detect architecture from state_dict, then build model
     state_dict = torch.load(model_path, map_location=device, weights_only=True)
+    head_out = _detect_head_out_channels(state_dict)
+    is_embedding_model = (head_out != num_dst_nodes) and (head_out > 0)
+    if head_out == 0:
+        is_embedding_model = True
+        head_out = cfg["channels"]
+
+    out_channels = cfg["channels"] if is_embedding_model else num_dst_nodes
+    model = LinkModel(
+        data=data,
+        col_stats_dict=col_stats_dict,
+        num_layers=cfg["num_layers"],
+        channels=cfg["channels"],
+        out_channels=out_channels,
+    ).to(device)
     model.load_state_dict(state_dict)
-    print(f"  Model loaded from {model_path}  (type={model_type})")
+    mode_str = "embedding+dot-product" if is_embedding_model else "idgnn"
+    print(f"  Model loaded from {model_path}  (mode={mode_str}, head_out={head_out})")
+
+    all_dst_emb = None
+    if is_embedding_model:
+        print("  Computing destination node embeddings...")
+        all_dst_emb = _compute_all_dst_embeddings(
+            model, data, dst_entity_table, device,
+            num_dst_nodes, num_neighbors_list, cfg["num_layers"],
+        )
+        print(f"  dst embeddings shape: {all_dst_emb.shape}")
 
     # ── Step 4: Inference ────────────────────────────────────────────────
     print(f"\n{BOLD}[3/4] Running link-prediction inference…{RESET}")
@@ -769,18 +760,15 @@ def main():
     gen_metrics     = {}
 
     for split in splits:
-        if model_type == "idgnn":
+        if is_embedding_model:
+            pred = run_link_inference_embedding(
+                model, loader_dict[split], device,
+                src_entity_table, all_dst_emb, eval_k,
+            )
+        else:
             pred = run_link_inference_idgnn(
                 model, loader_dict[split], device,
                 src_entity_table, num_dst_nodes, eval_k,
-            )
-        else:
-            # Two-tower: need all dst embeddings first
-            dst_emb = model.encoder(data.tf_dict)[dst_entity_table].to(device)
-            pred = run_link_inference_twotower(
-                model, loader_dict[split], device,
-                src_entity_table, dst_entity_table,
-                dst_emb, eval_k,
             )
         gen_predictions[split] = pred
         if pred.shape[0] > 0:
@@ -850,8 +838,20 @@ def main():
                 time_col=author_table.time_col,
             )
             try:
+                author_eval_k = author_task.eval_k
+                gen_eval_k = matched_pred.shape[1]
+                if gen_eval_k < author_eval_k:
+                    pad = np.full(
+                        (matched_pred.shape[0], author_eval_k - gen_eval_k),
+                        -1, dtype=matched_pred.dtype,
+                    )
+                    eval_pred = np.concatenate([matched_pred, pad], axis=1)
+                elif gen_eval_k > author_eval_k:
+                    eval_pred = matched_pred[:, :author_eval_k]
+                else:
+                    eval_pred = matched_pred
                 author_metrics_split = author_task.evaluate(
-                    matched_pred, matched_author_table
+                    eval_pred, matched_author_table
                 )
             except Exception as e:
                 author_metrics_split = {"error": str(e)}
