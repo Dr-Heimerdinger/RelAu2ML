@@ -15,7 +15,7 @@ print("=" * 60)
 print("TEST TRAINING TABLE — Interactive Setup")
 print("=" * 60)
 
-workdir_root = "/data/anhtdt/RelAu2ML/workdir"
+workdir_root = "/data/kl/plexe-clone/workdir"
 
 folder_name = input(
     "\n[1] Nhập tên folder trong workdir (ví dụ: rel_f1_driver_top3_4): "

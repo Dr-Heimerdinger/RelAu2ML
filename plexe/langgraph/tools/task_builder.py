@@ -927,6 +927,49 @@ def register_task_code(
                     match.group(0) + f"\n{indent}eval_k = 10",
                 )
 
+    # Inject author-consistent evaluation timestamp count for known cases where
+    # a single eval timestamp can easily produce empty val/test splits.
+    # We only standardize temporal evaluation cadence (num_eval_timestamps), not SQL.
+    if (
+        task_type in {
+            "binary_classification",
+            "regression",
+            "multiclass_classification",
+            "multilabel_classification",
+        }
+        and "num_eval_timestamps" not in sanitized_code
+    ):
+        # RelBench F1 tasks use 40 evaluation timestamps.
+        is_f1_driver_task = (
+            ('entity_table = "drivers"' in sanitized_code or "entity_table = 'drivers'" in sanitized_code)
+            and ('entity_col = "driverId"' in sanitized_code or "entity_col = 'driverId'" in sanitized_code)
+        )
+        if is_f1_driver_task:
+            import re
+            match = re.search(
+                r"^([ \t]+)(metrics\s*=\s*\[.*\])\s*$",
+                sanitized_code,
+                re.MULTILINE,
+            )
+            if match:
+                indent = match.group(1)
+                sanitized_code = sanitized_code.replace(
+                    match.group(0),
+                    match.group(0) + f"\n{indent}num_eval_timestamps = 40",
+                )
+            else:
+                match = re.search(
+                    r"^([ \t]+)(timedelta\s*=.*)\s*$",
+                    sanitized_code,
+                    re.MULTILINE,
+                )
+                if match:
+                    indent = match.group(1)
+                    sanitized_code = sanitized_code.replace(
+                        match.group(0),
+                        match.group(0) + f"\n{indent}num_eval_timestamps = 40",
+                    )
+
     with open(file_path, 'w') as f:
         f.write(sanitized_code)
 

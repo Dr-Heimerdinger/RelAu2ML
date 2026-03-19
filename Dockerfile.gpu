@@ -52,7 +52,7 @@ RUN uv pip install torchvision torchaudio
 # BƯỚC 4: PyTorch Geometric dependencies (dùng pip vì PyG wheel index)
 # Theo hướng dẫn chính thức: https://pytorch-geometric.readthedocs.io
 # ----------------------------
-RUN pip install pyg_lib torch_scatter torch_sparse torch_cluster torch_spline_conv \
+RUN uv pip install pyg_lib torch_scatter torch_sparse torch_cluster torch_spline_conv \
     -f https://data.pyg.org/whl/torch-2.10.0+cu128.html
  
 # ----------------------------

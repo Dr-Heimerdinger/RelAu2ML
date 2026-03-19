@@ -335,6 +335,7 @@ def _get_metric(metrics_dict, metric_name):
 enable_early_stopping = os.environ.get("PLEXE_EARLY_STOPPING", "false").lower() == "true"
 state_dict = None
 best_val_metric = -math.inf if higher_is_better else math.inf
+had_any_val_predictions = False
 patience_counter = 0
 early_stop_patience = 8
 min_delta = 1e-6
@@ -413,6 +414,7 @@ for epoch in range(start_epoch, epochs_configured + 1):
         state_dict = copy.deepcopy(model.state_dict())
         continue
 
+    had_any_val_predictions = True
     val_pred = torch.cat(val_pred_list, dim=0).numpy()
     val_metrics = task.evaluate(val_pred, val_table)
     print(f"Epoch {{epoch}}/{{epochs_configured}}: Loss={{train_loss:.4f}}, Val metrics: {{val_metrics}}")
@@ -528,8 +530,13 @@ def _to_json_safe(d):
     """Convert numpy/torch values to Python floats for JSON serialization."""
     return {{k: float(v) for k, v in d.items()}}
 
+best_val_out = None if not math.isfinite(best_val_metric) else float(best_val_metric)
+if not had_any_val_predictions:
+    # Make it explicit: metric is undefined because there was no validation data.
+    best_val_out = None
+
 results = {{
-    "best_val_{tune_metric}": float(best_val_metric),
+    "best_val_{tune_metric}": best_val_out,
     "tune_metric": tune_metric,
     "val_metrics": _to_json_safe(val_metrics),
     "test_metrics": _to_json_safe(test_metrics),

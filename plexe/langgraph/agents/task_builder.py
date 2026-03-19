@@ -361,7 +361,31 @@ You CANNOT proceed without dataset.py. Report this error.
             logger.info(f"Task file created at: {task_path}")
 
             intent = state.get("user_intent", {})
-            expected_type = intent.get("task_type", "binary_classification") if isinstance(intent, dict) else "binary_classification"
+            expected_type = (
+                intent.get("task_type", "binary_classification")
+                if isinstance(intent, dict)
+                else "binary_classification"
+            )
+            # Robust override: infer expected task type from the user's metric if present.
+            # Conversational intent extraction can be noisy; metric is usually unambiguous.
+            if isinstance(intent, dict):
+                metric = (intent.get("evaluation_metric") or "").strip().lower()
+                if metric:
+                    metric = metric.replace("-", "_").replace(" ", "_")
+                    regression_metrics = {"mae", "mse", "rmse", "r2"}
+                    binary_metrics = {
+                        "roc_auc",
+                        "auroc",
+                        "auc",
+                        "average_precision",
+                        "ap",
+                        "accuracy",
+                        "f1",
+                    }
+                    if metric in regression_metrics:
+                        expected_type = "regression"
+                    elif metric in binary_metrics:
+                        expected_type = "binary_classification"
             task_info["task_type"] = expected_type
 
             # Validate: the generated file's task_type must match the
