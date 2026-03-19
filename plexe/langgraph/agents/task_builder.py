@@ -349,6 +349,22 @@ You CANNOT proceed without dataset.py. Report this error.
             pass
         return None
 
+    @staticmethod
+    def _read_base_class_from_file(task_path: str) -> Optional[str]:
+        """Return the base class name from the class GenTask(...) declaration."""
+        try:
+            with open(task_path) as f:
+                for line in f:
+                    stripped = line.strip()
+                    if stripped.startswith("class GenTask"):
+                        if "RecommendationTask" in stripped:
+                            return "RecommendationTask"
+                        if "EntityTask" in stripped:
+                            return "EntityTask"
+        except Exception:
+            pass
+        return None
+
     def _process_result(self, result: Dict[str, Any], state: PipelineState) -> Dict[str, Any]:
         """Process result and extract task information."""
         base_result = super()._process_result(result, state)
@@ -385,10 +401,20 @@ You CANNOT proceed without dataset.py. Report this error.
                         "accuracy",
                         "f1",
                     }
+                    link_metrics = {
+                        "link_prediction_map",
+                        "link_prediction_precision",
+                        "link_prediction_recall",
+                        "map",
+                        "precision_at_k",
+                        "recall_at_k",
+                    }
                     if metric in regression_metrics:
                         expected_type = "regression"
                     elif metric in binary_metrics:
                         expected_type = "binary_classification"
+                    elif metric in link_metrics:
+                        expected_type = "link_prediction"
             task_info["task_type"] = expected_type
 
             # Validate: the generated file's task_type must match the
@@ -396,19 +422,30 @@ You CANNOT proceed without dataset.py. Report this error.
             # error so the retry loop can fix it.
             file_type = self._read_task_type_from_file(task_path)
             if file_type and file_type != expected_type:
-                mismatch_msg = (
-                    f"Task type mismatch: user intent is '{expected_type}' "
-                    f"(metric: {intent.get('evaluation_metric', 'N/A') if isinstance(intent, dict) else 'N/A'}) "
-                    f"but generated task.py uses '{file_type}'. "
-                    f"Deleting task.py to force a retry with the correct type."
+                base_class = self._read_base_class_from_file(task_path)
+                file_consistent = (
+                    (file_type == "link_prediction" and base_class == "RecommendationTask")
+                    or (file_type != "link_prediction" and base_class == "EntityTask")
                 )
-                logger.error(mismatch_msg)
-                # Remove the bad file so the retry loop detects it as missing
-                os.remove(task_path)
-                base_result["active_errors"] = [mismatch_msg]
-                base_result["error_history"] = [mismatch_msg]
-                base_result["current_phase"] = PipelinePhase.TASK_BUILDING.value
-                return base_result
+                if file_consistent:
+                    logger.warning(
+                        f"Task type: file says '{file_type}' but user_intent says "
+                        f"'{expected_type}'. Trusting the generated file (base class "
+                        f"'{base_class}' is consistent)."
+                    )
+                    task_info["task_type"] = file_type
+                else:
+                    mismatch_msg = (
+                        f"Task type mismatch: file says '{file_type}' "
+                        f"(base class '{base_class}') but expected '{expected_type}'. "
+                        f"Deleting task.py to force a retry."
+                    )
+                    logger.error(mismatch_msg)
+                    os.remove(task_path)
+                    base_result["active_errors"] = [mismatch_msg]
+                    base_result["error_history"] = [mismatch_msg]
+                    base_result["current_phase"] = PipelinePhase.TASK_BUILDING.value
+                    return base_result
 
             base_result["task_info"] = task_info
             base_result["current_phase"] = PipelinePhase.GNN_TRAINING.value
