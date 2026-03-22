@@ -379,26 +379,23 @@ def run_fairness_check(gen_dataset, gen_task,
     else:
         _ok(f"num_neighbors matches author reference ({ref_nn})")
 
-    # 4. Matched-row coverage
+    # 4. Matched-row coverage (uses live author tables, not parquet)
     print()
     src_col_gen  = gen_task.src_entity_col
     src_col_auth = author_task.src_entity_col
     time_col_gen  = gen_task.time_col
     time_col_auth = author_task.time_col
     for split in splits:
-        parquet = os.path.join(
-            author_tables_dir, dataset_name, task_name, f"{split}.parquet"
-        )
-        if not os.path.exists(parquet):
-            _warn(f"[{split}] Author parquet not found — run download_author_tables.py first")
-            summary["coverage"][split] = None
-            continue
-
-        author_tbl = Table.load(parquet)
         try:
             gen_tbl = gen_task.get_table(split, mask_input_cols=False)
         except Exception as e:
             _warn(f"[{split}] Could not build GenTask table: {e}")
+            summary["coverage"][split] = None
+            continue
+        try:
+            author_tbl = author_task.get_table(split, mask_input_cols=False)
+        except Exception as e:
+            _warn(f"[{split}] Could not build AuthorTask table: {e}")
             summary["coverage"][split] = None
             continue
 
@@ -611,6 +608,12 @@ def main():
     gen_dataset = GenDataset(csv_dir=csv_dir)
     gen_task    = GenTask(gen_dataset)
     db          = gen_dataset.get_db()
+    
+    # Explicitly register all tables in DuckDB to ensure consistency across 
+    # different modules (e.g. GenTask vs AuthorTask) that might use duckdb.sql.
+    import duckdb
+    for tname, table in db.table_dict.items():
+        duckdb.register(tname, table.df)
 
     if not isinstance(gen_task, RecommendationTask):
         print(
@@ -648,14 +651,15 @@ def main():
         gen_tables[split] = gen_task.get_table(split, mask_input_cols=False)
 
     # ── Step 2: Fairness check ───────────────────────────────────────────
-    author_dataset = AuthorDatasetClass()
-    author_task    = AuthorTaskClass(author_dataset)
+    # Use gen_dataset for AuthorTask so both tasks share the same reindexed
+    # primary/foreign key mapping (Database.reindex_pkeys_and_fkeys).
+    author_task = AuthorTaskClass(gen_dataset)
 
     fairness_summary = {}
     if not args.skip_fairness_check:
         fairness_summary = run_fairness_check(
             gen_dataset, gen_task,
-            author_dataset, author_task,
+            gen_dataset, author_task,
             cfg,
             author_tables_dir=args.author_tables_dir,
             dataset_name=args.dataset,
@@ -792,22 +796,18 @@ def main():
     comparison_results = {}
 
     for split in splits:
-        author_parquet = os.path.join(
-            args.author_tables_dir, args.dataset, args.task, f"{split}.parquet"
-        )
-        if not os.path.exists(author_parquet):
-            print(f"  [{split}] Author table not found: {author_parquet}")
-            print(f"         Run: python scripts/download_author_tables.py "
-                  f"--dataset {args.dataset} --task {args.task}")
-            comparison_results[split] = {"error": "Author table not found"}
-            continue
-
-        author_table = Table.load(author_parquet)
-        gen_table    = gen_tables[split]
-        pred         = gen_predictions[split]
+        gen_table = gen_tables[split]
+        pred      = gen_predictions[split]
 
         if pred.shape[0] == 0:
             comparison_results[split] = {"error": "No predictions available"}
+            continue
+
+        try:
+            author_table = author_task.get_table(split, mask_input_cols=False)
+        except Exception as e:
+            print(f"  [{split}] Could not build AuthorTask table: {e}")
+            comparison_results[split] = {"error": f"AuthorTask table failed: {e}"}
             continue
 
         # Row alignment: merge on (src_entity, time)

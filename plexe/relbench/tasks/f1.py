@@ -188,8 +188,12 @@ class DriverRaceCompeteTask(RecommendationTask):
     eval_k = 10
 
     def make_table(self, db: Database, timestamps: "pd.Series[pd.Timestamp]") -> Table:
+        # import duckdb
         timestamp_df = pd.DataFrame({"timestamp": timestamps})
         results = db.table_dict["results"].df
+
+        duckdb.register("timestamp_df", timestamp_df)
+        duckdb.register("results", results)
 
         df = duckdb.sql(
             f"""
