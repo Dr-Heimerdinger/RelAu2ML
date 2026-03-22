@@ -56,76 +56,73 @@ def export_tables_to_csv(
     output_dir: str,
     table_names: Optional[List[str]] = None
 ) -> Dict[str, Any]:
-    """
-    Export database tables to CSV files.
-    
+    """Export database tables to CSV files with chunked writes for large tables.
+
     Args:
         db_connection_string: Database connection string
         output_dir: Directory to save CSV files
         table_names: Optional list of specific tables to export (exports all if None)
-    
+
     Returns:
         Dictionary with export status and file paths
     """
     import pandas as pd
-    from sqlalchemy import create_engine, inspect
+    from sqlalchemy import create_engine, inspect, text
     import os
-    
-    # Extract and log database name for validation
-    import re
-    db_name_match = re.search(r'/([^/]+?)(?:\?|$)', db_connection_string)
-    db_name = db_name_match.group(1) if db_name_match else "unknown"
 
-    # Log which database we're exporting from
-    print(f"[EDA Agent] Exporting tables from database: {db_name}")
-    print(f"[EDA Agent] Connection string: {db_connection_string[:50]}")
-
-    # Create a metadata file to track which database was exported
-    metadata_file = os.path.join(output_dir, "_export_metadata.json")
-    import json
-    metadata = {
-        "database_name": db_name,
-        "connection_string": db_connection_string,
-        "export_timestamp": pd.Timestamp.now().isoformat(),
-        "tables_exported": []
-    }
+    CHUNK_SIZE = 200_000
 
     os.makedirs(output_dir, exist_ok=True)
-    
+
     try:
         engine = create_engine(db_connection_string)
         inspector = inspect(engine)
-        
+
         if table_names is None:
             table_names = inspector.get_table_names()
-        
+
         exported = []
         errors = []
-        
+
         for table in table_names:
+            file_path = os.path.join(output_dir, f"{table}.csv")
             try:
-                df = pd.read_sql_table(table, engine)
-                file_path = os.path.join(output_dir, f"{table}.csv")
-                df.to_csv(file_path, index=False, date_format="%Y-%m-%d %H:%M:%S")
-                exported.append({
-                    "table": table,
-                    "path": file_path,
-                    "rows": len(df),
-                })
+                with engine.connect() as conn:
+                    row_count_result = conn.execute(
+                        text(f'SELECT COUNT(*) FROM "{table}"')
+                    )
+                    total_rows = row_count_result.scalar()
+
+                if total_rows <= CHUNK_SIZE:
+                    df = pd.read_sql_table(table, engine)
+                    df.to_csv(file_path, index=False, date_format="%Y-%m-%d %H:%M:%S")
+                else:
+                    first_chunk = True
+                    written_rows = 0
+                    for chunk in pd.read_sql_table(table, engine, chunksize=CHUNK_SIZE):
+                        chunk.to_csv(
+                            file_path,
+                            mode="w" if first_chunk else "a",
+                            header=first_chunk,
+                            index=False,
+                            date_format="%Y-%m-%d %H:%M:%S",
+                        )
+                        written_rows += len(chunk)
+                        first_chunk = False
+                    total_rows = written_rows
+
+                exported.append({"table": table, "path": file_path, "rows": total_rows})
             except Exception as e:
                 errors.append({"table": table, "error": str(e)})
-        
+
         return {
             "status": "success",
             "output_dir": output_dir,
             "exported_tables": exported,
-            "errors": errors if errors else None
+            "errors": errors if errors else None,
         }
     except Exception as e:
-        return {
-            "status": "failed",
-            "error": str(e)
-        }
+        return {"status": "failed", "error": str(e)}
 
 
 @langchain_tool
@@ -191,8 +188,4 @@ def extract_schema_metadata(db_connection_string: str) -> Dict[str, Any]:
             "temporal_columns": temporal_columns
         }
     except Exception as e:
-        # Save metadata file
-        with open(metadata_file, 'w') as f:
-            json.dump(metadata, f, indent=2)
-
         return {"status": "error", "error": str(e)}
