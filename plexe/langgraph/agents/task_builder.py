@@ -235,10 +235,9 @@ You CANNOT proceed without dataset.py. Report this error.
             if eda.get("temporal_analysis"):
                 context_parts.append("\nTemporal Analysis:")
                 for table, analysis in eda["temporal_analysis"].items():
-                    if analysis.get("time_columns"):
-                        cols = analysis['time_columns']
+                    cols = analysis.get("temporal_columns") or analysis.get("time_columns")
+                    if cols:
                         context_parts.append(f"  - {table} time columns: {cols}")
-                        # Add time range info if available
                         for col_name, col_info in cols.items():
                             if isinstance(col_info, dict):
                                 min_date = col_info.get('min')
@@ -274,58 +273,15 @@ You CANNOT proceed without dataset.py. Report this error.
         dataset_file = f"{working_dir}/dataset.py"
 
         context_parts.append(f"""
-## Your Task (follow the Mandatory Workflow in the system prompt):
-1. Determine task type from user intent and metric
-2. Validate dataset timestamps: call validate_dataset_timestamps("{dataset_file}", "{csv_dir}", timedelta_days)
-   where timedelta_days is the prediction window you plan to use.{f'''
-   NOTE: Current val/test gap is {timestamp_gap_days} days. Your timedelta MUST be <= {timestamp_gap_days}.''' if timestamp_gap_days else ''}
-   If invalid, fix with fix_dataset_timestamps() before proceeding.
-3. Choose base class (EntityTask or RecommendationTask)
-4. Call analyze_task_structure() to get evidence for pattern selection:
-   analyze_task_structure("{csv_dir}", event_table, entity_col, time_col, timedelta_days, task_description, entity_table)
-   Review ALL sections of the output, especially:
-   - entity_source.entity_table_has_creation_date (Pattern D signal)
-   - temporal.max_gap_exceeds_timedelta (if true, prefer Pattern B over A even with an entity table)
-   - temporal.suggested_lookback_interval (use this for Pattern B lookback value)
-   - pattern_candidates (ranked suggestions -- use as guidance, not as absolute rule)
-   - building_blocks (whether CTE, nested JOIN, quality filter, or HAVING is needed)
-   - building_blocks.creation_date_gate (for link prediction: entity tables with creation dates that MUST gate inclusion)
-   - schema_hints.potential_join_tables (tables that share columns with the event table)
-   - schema_hints.categorical_columns (low-cardinality type columns that may need WHERE filters — check if any match the task semantics)
-   - schema_hints.sentinel_warnings (entity ID sentinel values like -1 or NULL to exclude)
-5. Identify entity table, entity column, time column, and target column
-6. Design SQL query using your selected pattern. Consider composable building blocks (Part 4B) if needed:
-   - CTE: for multi-table preprocessing or combining event sources
-   - Nested LEFT JOIN: for entity-event pre-join patterns
-   - Chained JOIN: for link prediction through junction tables
-   - Quality/categorical filters: for type columns, rating/status conditions, sentinel exclusion
-   - CreationDate gate: for link prediction when entity tables have creation/start dates (LEFT JOIN entity ON creation_date <= t.timestamp)
-7. Choose appropriate metrics based on task type
-8. For link prediction: set eval_k (typical: 10-12)
-9. Test your SQL: test_sql_query("{csv_dir}", query)
-10. Generate complete code and save: register_task_code(code, "GenTask", "{working_dir}/task.py", task_type)
-
-## File Paths:
+## Execute the Mandatory Workflow (system prompt Part 3):
 - Dataset file: {dataset_file}
 - CSV directory: {csv_dir}
 - Task output: {working_dir}/task.py
-
-## Reminders:
-- Use TaskType enum: TaskType.BINARY_CLASSIFICATION, TaskType.REGRESSION, TaskType.LINK_PREDICTION
-- "predict if", "whether", "will make any", "will X do more than N" = BINARY_CLASSIFICATION, NOT REGRESSION (use IF(COUNT>=1,1,0) not raw COUNT)
-- Import correct base class: EntityTask or RecommendationTask
-- Import only metrics you use from plexe.relbench.metrics
-- Column names in SQL must EXACTLY match CSV column names INCLUDING CASE (use get_csv_files_info to verify)
-- entity_table must EXACTLY match the CSV filename (without .csv) INCLUDING CASE
-- time_col value must match the timestamp column name in the SQL output
-- ALWAYS use INTERVAL '{{self.timedelta}}' in SQL — NEVER compute days manually
-- Do NOT add CAST(col AS TIMESTAMP) for columns already parsed as datetime in dataset.py
-- Use duckdb.register() for every DataFrame, then duckdb.sql()
-- Return Table with proper fkey_col_to_pkey_table mapping
-- If data range is narrow (< 3 months) or data_range/timedelta < 5, set num_eval_timestamps = 40
-- When analyze_task_structure() reports categorical_columns, check if any match the task semantics and add WHERE filters for relevant values (e.g., PostTypeId=1 for questions, VoteTypeId=2 for upvotes)
-- When sentinel_warnings are reported, add filters to exclude sentinel entity IDs (e.g., WHERE entity_id != -1 AND entity_id IS NOT NULL)
-- For LINK_PREDICTION: when building_blocks.creation_date_gate reports entity tables with creation dates, you MUST add LEFT JOIN + creation_date <= t.timestamp for those entities to prevent predicting links to/from non-existent entities
+{f'- Val/test gap: {timestamp_gap_days} days. timedelta MUST be <= {timestamp_gap_days}.' if timestamp_gap_days else ''}
+- validate_dataset_timestamps("{dataset_file}", "{csv_dir}", timedelta_days)
+- analyze_task_structure("{csv_dir}", event_table, entity_col, time_col, timedelta_days, task_description, entity_table)
+- test_sql_query("{csv_dir}", query)
+- register_task_code(code, "GenTask", "{working_dir}/task.py", task_type)
 """)
         
         return "\n".join(context_parts)

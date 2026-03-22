@@ -9,11 +9,7 @@ from plexe.langgraph.tools.graph_architect import (
 )
 
 from plexe.langgraph.tools.eda import (
-    analyze_csv_statistics,
-    detect_data_quality_issues,
-    analyze_temporal_patterns,
-    analyze_table_relationships,
-    generate_eda_summary,
+    analyze_all_csv,
 )
 
 from plexe.langgraph.tools.dataset_builder import (
@@ -40,11 +36,7 @@ __all__ = [
     "validate_db_connection",
     "export_tables_to_csv",
     "extract_schema_metadata",
-    "analyze_csv_statistics",
-    "detect_data_quality_issues",
-    "analyze_temporal_patterns",
-    "analyze_table_relationships",
-    "generate_eda_summary",
+    "analyze_all_csv",
     "get_csv_files_info",
     "get_temporal_statistics",
     "register_dataset_code",
