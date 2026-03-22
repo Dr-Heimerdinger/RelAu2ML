@@ -258,6 +258,8 @@ WHERE ev.src_entity_id IS NOT NULL AND ev.dst_entity_id IS NOT NULL
 GROUP BY t.timestamp, ev.src_entity_id
 ```
 
+**ANTI-PATTERN**: Do NOT add Pattern B's lookback filter (`WHERE entity_id IN (SELECT ...)`) or sentinel ID filters (`entity_id != 0`) to link prediction queries. Link prediction must capture ALL entities that participate in events within the prediction window. Lookback filters restrict entity population; sentinel filters remove valid reindexed IDs. Both corrupt training data vs the reference.
+
 ### Link Prediction + CreationDate Gate
 
 Use when `analyze_task_structure()` reports `building_blocks.creation_date_gate` with entity tables that have a creation/start/publish date. Both src and dst entities must exist (creation_date <= t.timestamp) BEFORE the prediction window opens. This is the most common link prediction pattern in practice.
@@ -318,7 +320,7 @@ GROUP BY t.timestamp, jt.src_entity_id
 
 Apply in this order:
 
-1. Is the output a list of destination entities? -- use **Link Prediction** as the base pattern. Then check: does `building_blocks.creation_date_gate` report entity tables with creation dates? If yes, compose with **CreationDate Gate** (see "Link + CreationDate Gate" above). Also check `schema_hints.sentinel_warnings` and `schema_hints.categorical_columns` for additional filters.
+1. Is the output a list of destination entities? -- use **Link Prediction** as the base pattern. Then check: does `building_blocks.creation_date_gate` report entity tables with creation dates? If yes, compose with **CreationDate Gate** (see "Link + CreationDate Gate" above). **Never combine Link Prediction with Pattern B's lookback filter or sentinel ID filters.** Check `schema_hints.categorical_columns` for quality filters only.
 2. Is the task about behavioral absence (churn, inactive, retention, lapse)? -- use **Pattern A**
 3. Does the entity table have a creation/start/publish date that should gate inclusion? -- use **Pattern D**
 4. Should every entity get a prediction row, even with zero target? -- use **Pattern C**

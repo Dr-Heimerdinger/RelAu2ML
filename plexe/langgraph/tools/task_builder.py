@@ -423,6 +423,16 @@ def analyze_task_structure(
                             "recommendation": f"Filter: {entity_col} != {sentinel}",
                         })
 
+        # For link prediction, sentinel filtering is handled by
+        # RecommendationTask.filter_dangling_entities(). Annotate sentinel
+        # warnings so the LLM skips adding redundant WHERE filters.
+        if is_link_task and sentinel_warnings:
+            for sw in sentinel_warnings:
+                sw["recommendation"] = (
+                    f"(SKIP for link prediction — dangling entities are handled "
+                    f"by filter_dangling_entities().) Original: {sw['recommendation']}"
+                )
+
         schema_hints = {
             "event_table_columns": event_table_cols,
             "entity_table_columns": entity_table_cols,
@@ -989,6 +999,71 @@ def register_task_code(
                     match.group(0),
                     match.group(0) + f"\n{indent}eval_k = 10",
                 )
+
+    # ── Link prediction SQL anti-pattern detection ──────────────────
+    # Reject link prediction code that uses lookback filters, sentinel ID
+    # filters, HAVING clauses, or active-entity CTEs.  These patterns
+    # produce training tables incompatible with the reference tasks.
+    if task_type == "link_prediction":
+        import re as _re
+        sql_block = ""
+        # Extract the SQL string from the code (inside f""" ... """ or f''' ... ''')
+        sql_match = _re.search(
+            r'(?:duckdb\.sql|sql)\s*\(\s*f?(?:"""|\'\'\')(.*?)(?:"""|\'\'\')',
+            sanitized_code,
+            _re.DOTALL,
+        )
+        if sql_match:
+            sql_block = sql_match.group(1).upper()
+
+        antipattern_issues = []
+
+        # 1. Lookback filter: WHERE entity IN (SELECT DISTINCT ... WHERE time > ... - INTERVAL ...)
+        if _re.search(r"IN\s*\(\s*SELECT\s+DISTINCT", sql_block):
+            antipattern_issues.append(
+                "Lookback WHERE IN (SELECT DISTINCT ...) filter detected. "
+                "Link prediction must NOT use lookback filters — capture ALL "
+                "entities that participate in events within the prediction window."
+            )
+
+        # 2. Sentinel ID filter: entity_id != 0 or entity_id != -1
+        if _re.search(r"!=\s*(?:0|-1)\b", sql_block):
+            antipattern_issues.append(
+                "Sentinel ID filter (e.g., driverId != 0) detected. "
+                "Do NOT filter entity IDs in link prediction — after reindexing, "
+                "ID 0 is a valid entity. Dangling entities are handled automatically "
+                "by filter_dangling_entities()."
+            )
+
+        # 3. HAVING clause (restricts entity population)
+        if "HAVING" in sql_block:
+            antipattern_issues.append(
+                "HAVING clause detected. Link prediction should not use HAVING "
+                "to restrict entity population. Remove the HAVING clause."
+            )
+
+        # 4. Active-entity CTE (e.g., WITH active_drivers AS, WITH active_entities AS)
+        if _re.search(r"WITH\s+ACTIVE[_\s]", sql_block):
+            antipattern_issues.append(
+                "Active-entity CTE (e.g., WITH active_drivers AS ...) detected. "
+                "Link prediction must use the simple pattern: LEFT JOIN event table "
+                "on temporal window + GROUP BY source entity + LIST(DISTINCT dest)."
+            )
+
+        if antipattern_issues:
+            return {
+                "status": "error",
+                "error": (
+                    "Link prediction SQL contains anti-patterns that produce "
+                    "incorrect training tables:\n"
+                    + "\n".join(f"  • {issue}" for issue in antipattern_issues)
+                    + "\n\nUse the Basic Link Prediction pattern: "
+                    "LEFT JOIN event ON temporal window, "
+                    "WHERE src IS NOT NULL AND dst IS NOT NULL, "
+                    "GROUP BY timestamp + src, LIST(DISTINCT dst). "
+                    "No lookback, no sentinel filters, no HAVING, no active-entity CTEs."
+                ),
+            }
 
     # Inject author-consistent evaluation timestamp count for known cases where
     # a single eval timestamp can easily produce empty val/test splits.

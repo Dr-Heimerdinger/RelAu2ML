@@ -153,6 +153,11 @@ KEY RULES & BEST PRACTICES:
    - Wrap DataFrames: df=pd.DataFrame(your_df)
    - pkey_col: Primary key column name (can be None if no PK)
    - time_col: Temporal column (None for static/dimension tables like circuits, drivers, users profile)
+   - **time_col MUST NOT be a demographic/biographical date column** (e.g., `dob`, `birthday`, `date_of_birth`,
+     `founding_date`, `birth_year`). These are static attributes, not event timestamps. Setting time_col to such
+     columns causes `reindex_pkeys_and_fkeys()` to sort the entity table by that date before reindexing,
+     producing corrupted ID mappings. Only use time_col for columns that represent when a ROW was CREATED
+     (e.g., `CreationDate`, `registration_date`, `start_date`).
    - fkey_col_to_pkey_table: Dict mapping foreign key columns to referenced table names
    - Self-references are OK: {"ParentId": "posts"} in posts table
 

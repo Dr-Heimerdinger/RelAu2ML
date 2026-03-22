@@ -269,10 +269,21 @@ def run_link_inference_idgnn(model, loader, device, src_entity_table,
 
 
 def _compute_all_dst_embeddings(model, data, dst_entity_table, device,
-                                num_dst_nodes, num_neighbors, num_layers):
-    """Compute embeddings for ALL destination nodes using NeighborLoader."""
+                                num_dst_nodes, num_neighbors, num_layers,
+                                eval_seed_time=None):
+    """Compute embeddings for ALL destination nodes using NeighborLoader.
+
+    When *eval_seed_time* is provided (an int unix timestamp), every
+    destination node is assigned that fixed timestamp — matching how the
+    training script evaluates (``torch.full((num_dst,), eval_seed_time)``).
+    Without this, each race's own date is used, producing different temporal
+    neighbourhoods and completely different embeddings → 0.0 metrics.
+    """
     from torch_geometric.loader import NeighborLoader
-    dst_seed_time = data[dst_entity_table].time[:num_dst_nodes]
+    if eval_seed_time is not None:
+        dst_seed_time = torch.full((num_dst_nodes,), eval_seed_time)
+    else:
+        dst_seed_time = data[dst_entity_table].time[:num_dst_nodes]
     dst_loader = NeighborLoader(
         data,
         num_neighbors=num_neighbors,
@@ -318,6 +329,21 @@ def run_link_inference_embedding(model, loader, device, src_entity_table,
     if not all_topk:
         return np.array([]).reshape(0, eval_k)
     return torch.cat(all_topk, dim=0).numpy()
+
+
+def _get_author_table(author_task, split, author_tables_dir, dataset_name, task_name):
+    """Load the author table from parquet if it exists, otherwise generate it."""
+    import os
+    from plexe.relbench.base import Table
+    if author_tables_dir:
+        pq_path = os.path.join(author_tables_dir, dataset_name, task_name, f"{split}.parquet")
+        if os.path.exists(pq_path):
+            try:
+                table = Table.load(pq_path)
+                return table
+            except Exception:
+                pass
+    return author_task.get_table(split, mask_input_cols=False)
 
 
 # ── Fairness check ─────────────────────────────────────────────────────────────
@@ -393,7 +419,7 @@ def run_fairness_check(gen_dataset, gen_task,
             summary["coverage"][split] = None
             continue
         try:
-            author_tbl = author_task.get_table(split, mask_input_cols=False)
+            author_tbl = _get_author_table(author_task, split, author_tables_dir, dataset_name, task_name)
         except Exception as e:
             _warn(f"[{split}] Could not build AuthorTask table: {e}")
             summary["coverage"][split] = None
@@ -758,21 +784,35 @@ def main():
     mode_str = "embedding+dot-product" if is_embedding_model else "idgnn"
     print(f"  Model loaded from {model_path}  (mode={mode_str}, head_out={head_out})")
 
-    all_dst_emb = None
-    if is_embedding_model:
-        print("  Computing destination node embeddings...")
-        all_dst_emb = _compute_all_dst_embeddings(
-            model, data, dst_entity_table, device,
-            num_dst_nodes, num_neighbors_list, cfg["num_layers"],
-        )
-        print(f"  dst embeddings shape: {all_dst_emb.shape}")
-
     # ── Step 4: Inference ────────────────────────────────────────────────
     print(f"\n{BOLD}[3/4] Running link-prediction inference…{RESET}")
     gen_predictions = {}
     gen_metrics     = {}
 
     for split in splits:
+        # For embedding models, recompute dst embeddings per split using a
+        # fixed eval_seed_time derived from the first row of the split table.
+        # This matches how train_script.py evaluates (single fixed timestamp
+        # for all dst nodes), avoiding the embedding divergence that caused
+        # 0.0 metrics when each node's own date was used instead.
+        all_dst_emb = None
+        if is_embedding_model:
+            table = gen_tables[split]
+            if len(table.df) == 0:
+                gen_predictions[split] = np.array([]).reshape(0, eval_k)
+                gen_metrics[split] = {}
+                print(f"  [{split}] Empty table — skipping")
+                continue
+            eval_time_np = to_unix_time(table.df[table.time_col].iloc[:1])
+            eval_seed_time = int(eval_time_np[0])
+            print(f"  [{split}] Computing dst embeddings (eval_seed_time={eval_seed_time})...")
+            all_dst_emb = _compute_all_dst_embeddings(
+                model, data, dst_entity_table, device,
+                num_dst_nodes, num_neighbors_list, cfg["num_layers"],
+                eval_seed_time=eval_seed_time,
+            )
+            print(f"  [{split}] dst embeddings shape: {all_dst_emb.shape}")
+
         if is_embedding_model:
             pred = run_link_inference_embedding(
                 model, loader_dict[split], device,
@@ -804,7 +844,7 @@ def main():
             continue
 
         try:
-            author_table = author_task.get_table(split, mask_input_cols=False)
+            author_table = _get_author_table(author_task, split, args.author_tables_dir, args.dataset, args.task)
         except Exception as e:
             print(f"  [{split}] Could not build AuthorTask table: {e}")
             comparison_results[split] = {"error": f"AuthorTask table failed: {e}"}

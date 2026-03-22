@@ -252,10 +252,26 @@ def run_inference(model, loader, device, entity_table):
             batch = batch.to(device)
             pred = model(batch, entity_table)
             pred = pred.view(-1) if pred.size(1) == 1 else pred
-            preds.append(pred.detach().cpu())
-    if not preds:
+            all_preds.append(pred.detach().cpu())
+    if not all_preds:
         return np.array([])
-    return torch.cat(preds, dim=0).numpy()
+    return torch.cat(all_preds, dim=0).numpy()
+
+
+def _get_author_table(author_task, split, author_tables_dir, dataset_name, task_name):
+    """Load the author table from parquet if it exists, otherwise generate it."""
+    import os
+    from plexe.relbench.base import Table
+    if author_tables_dir:
+        pq_path = os.path.join(author_tables_dir, dataset_name, task_name, f"{split}.parquet")
+        if os.path.exists(pq_path):
+            try:
+                table = Table.load(pq_path)
+                return table
+            except Exception:
+                pass
+    return author_task.get_table(split, mask_input_cols=False)
+
 
 
 # ── Fairness check ─────────────────────────────────────────────────────────────
@@ -328,7 +344,7 @@ def run_fairness_check(gen_dataset, gen_task,
             summary["coverage"][split] = None
             continue
         try:
-            author_tbl = author_task.get_table(split, mask_input_cols=False)
+            author_tbl = _get_author_table(author_task, split, author_tables_dir, dataset_name, task_name)
         except Exception as e:
             _warn(f"[{split}] Could not build AuthorTask table: {e}")
             summary["coverage"][split] = None
@@ -705,7 +721,7 @@ def main():
             continue
 
         try:
-            author_table = author_task.get_table(split, mask_input_cols=False)
+            author_table = _get_author_table(author_task, split, args.author_tables_dir, args.dataset, args.task)
         except Exception as e:
             print(f"  [{split}] Could not build AuthorTask table: {e}")
             comparison_results[split] = {"error": f"AuthorTask table failed: {e}"}
