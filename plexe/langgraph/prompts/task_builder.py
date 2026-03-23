@@ -125,16 +125,103 @@ Check schema_hints.categorical_columns and sentinel_warnings from analyze_task_s
 
 ## Part 5 -- Code Structure
 
-Use `import duckdb` inside make_table. Register all DataFrames with duckdb.register().
-Always use INTERVAL '{self.timedelta}' in SQL -- NEVER compute days manually.
+Required imports (EXACT paths -- do NOT guess or invent import paths):
+```python
+import pandas as pd
+from plexe.relbench.base import Database, EntityTask, Table, TaskType
+from plexe.relbench.base import RecommendationTask  # for link prediction only
+from plexe.relbench.metrics import average_precision, accuracy, f1, roc_auc  # binary
+from plexe.relbench.metrics import r2, mae, rmse  # regression
+from plexe.relbench.metrics import link_prediction_map, link_prediction_precision, link_prediction_recall  # link
+```
 
-EntityTask attrs: task_type, entity_col, entity_table, time_col, target_col, timedelta, metrics.
-RecommendationTask attrs: task_type, src_entity_col, src_entity_table, dst_entity_col, dst_entity_table, time_col, timedelta, metrics, eval_k.
+### EntityTask Template (binary classification / regression)
 
-Metrics from plexe.relbench.metrics:
-- Binary: average_precision, accuracy, f1, roc_auc
-- Regression: r2, mae, rmse
-- Link: link_prediction_map, link_prediction_precision, link_prediction_recall
+```python
+import pandas as pd
+from plexe.relbench.base import Database, EntityTask, Table, TaskType
+from plexe.relbench.metrics import average_precision, accuracy, f1, roc_auc
+
+class GenTask(EntityTask):
+    task_type = TaskType.BINARY_CLASSIFICATION
+    entity_col = "entity_id"
+    entity_table = "entity_table_name"
+    time_col = "timestamp"
+    target_col = "target"
+    timedelta = pd.Timedelta(days=7)
+    metrics = [average_precision, accuracy, f1, roc_auc]
+    # num_eval_timestamps = 40  # only when analyze_task_structure recommends it
+
+    def make_table(self, db: Database, timestamps: "pd.Series[pd.Timestamp]") -> Table:
+        import duckdb
+        timestamp_df = pd.DataFrame({"timestamp": timestamps})
+        entity_df = db.table_dict["entity_table_name"].df
+        event_df = db.table_dict["event_table_name"].df
+        duckdb.register("timestamp_df", timestamp_df)
+        duckdb.register("entity_table_name", entity_df)
+        duckdb.register("event_table_name", event_df)
+        df = duckdb.sql(f\"\"\"
+            -- your SQL pattern here using INTERVAL '{self.timedelta}'
+        \"\"\").df()
+        return Table(
+            df=df,
+            fkey_col_to_pkey_table={self.entity_col: self.entity_table},
+            pkey_col=None,
+            time_col=self.time_col,
+        )
+```
+
+### RecommendationTask Template (link prediction)
+
+```python
+import pandas as pd
+from plexe.relbench.base import Database, RecommendationTask, Table, TaskType
+from plexe.relbench.metrics import link_prediction_precision, link_prediction_recall, link_prediction_map
+
+class GenTask(RecommendationTask):
+    task_type = TaskType.LINK_PREDICTION
+    src_entity_col = "src_id"
+    src_entity_table = "src_table_name"
+    dst_entity_col = "dst_id"
+    dst_entity_table = "dst_table_name"
+    time_col = "timestamp"
+    timedelta = pd.Timedelta(days=7)
+    metrics = [link_prediction_precision, link_prediction_recall, link_prediction_map]
+    eval_k = 10
+
+    def make_table(self, db: Database, timestamps: "pd.Series[pd.Timestamp]") -> Table:
+        import duckdb
+        timestamp_df = pd.DataFrame({"timestamp": timestamps})
+        event_df = db.table_dict["event_table_name"].df
+        duckdb.register("timestamp_df", timestamp_df)
+        duckdb.register("event_table_name", event_df)
+        df = duckdb.sql(f\"\"\"
+            SELECT t.timestamp, ev.src_id, LIST(DISTINCT ev.dst_id) AS dst_id
+            FROM timestamp_df t
+            LEFT JOIN event_table_name ev ON ev.time_col > t.timestamp
+              AND ev.time_col <= t.timestamp + INTERVAL '{self.timedelta}'
+            WHERE ev.src_id IS NOT NULL AND ev.dst_id IS NOT NULL
+            GROUP BY t.timestamp, ev.src_id
+        \"\"\").df()
+        return Table(
+            df=df,
+            fkey_col_to_pkey_table={
+                self.src_entity_col: self.src_entity_table,
+                self.dst_entity_col: self.dst_entity_table,
+            },
+            pkey_col=None,
+            time_col=self.time_col,
+        )
+```
+
+### Critical rules
+- Use `import duckdb` inside make_table. Register ALL DataFrames with duckdb.register().
+- Always use `INTERVAL '{self.timedelta}'` in SQL -- NEVER compute days manually.
+- `task_type` must use `TaskType` enum, NOT a string.
+- `timedelta` must be `pd.Timedelta(days=N)`, NOT a string.
+- `make_table` signature: `(self, db: Database, timestamps: "pd.Series[pd.Timestamp]") -> Table`
+- Must return `Table(df=df, fkey_col_to_pkey_table=..., pkey_col=None, time_col=self.time_col)`
+- `timestamp_df = pd.DataFrame({"timestamp": timestamps})` -- use the framework-provided timestamps.
 
 ---
 

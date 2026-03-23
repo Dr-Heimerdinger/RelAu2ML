@@ -76,33 +76,43 @@ EXECUTE THESE STEPS IN ORDER:
         return "\n".join(context_parts)
 
     def _process_result(self, result: Dict[str, Any], state: PipelineState) -> Dict[str, Any]:
+        import json
+        import os
+        from langchain_core.messages import ToolMessage
+
         base_result = super()._process_result(result, state)
 
         eda_info = {}
         working_dir = state.get("working_dir", "")
-        csv_dir = f"{working_dir}/csv_files" if working_dir else None
+        csv_dir = os.path.abspath(os.path.join(working_dir, "csv_files")) if working_dir else None
 
+        # Extract tool results from ToolMessage objects (not AIMessage.tool_calls)
         messages = result.get("messages", [])
         for msg in messages:
-            if hasattr(msg, 'tool_calls') and msg.tool_calls:
-                for tool_call in msg.tool_calls:
-                    tool_name = tool_call.get("name", "")
-                    tool_result = tool_call.get("result", {})
+            if not isinstance(msg, ToolMessage):
+                continue
+            try:
+                content = msg.content
+                tool_result = json.loads(content) if isinstance(content, str) else content
+            except (json.JSONDecodeError, TypeError):
+                tool_result = {}
+            if not isinstance(tool_result, dict):
+                continue
 
-                    if tool_name == "extract_schema_metadata":
-                        if isinstance(tool_result, dict) and "tables" in tool_result:
-                            base_result["schema_info"] = tool_result
+            if msg.name == "extract_schema_metadata":
+                if "tables" in tool_result:
+                    base_result["schema_info"] = tool_result
 
-                    if tool_name == "analyze_all_csv" and isinstance(tool_result, dict):
-                        if tool_result.get("status") == "success":
-                            eda_info["statistics"] = tool_result.get("statistics")
-                            eda_info["quality_issues"] = tool_result.get("quality_issues")
-                            eda_info["temporal_analysis"] = tool_result.get("temporal_analysis")
-                            eda_info["suggested_splits"] = tool_result.get("suggested_splits")
-                            eda_info["relationship_analysis"] = tool_result.get("relationship_analysis")
-                            eda_info["summary"] = tool_result.get("summary")
+            elif msg.name == "analyze_all_csv":
+                if tool_result.get("status") == "success":
+                    eda_info["statistics"] = tool_result.get("statistics")
+                    eda_info["quality_issues"] = tool_result.get("quality_issues")
+                    eda_info["temporal_analysis"] = tool_result.get("temporal_analysis")
+                    eda_info["suggested_splits"] = tool_result.get("suggested_splits")
+                    eda_info["relationship_analysis"] = tool_result.get("relationship_analysis")
+                    eda_info["summary"] = tool_result.get("summary")
 
-        import os
+        # Filesystem fallback for csv_dir
         if csv_dir and os.path.isdir(csv_dir) and any(
             f.endswith('.csv') for f in os.listdir(csv_dir)
         ):

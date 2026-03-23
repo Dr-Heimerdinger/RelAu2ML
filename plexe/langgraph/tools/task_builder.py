@@ -74,6 +74,7 @@ def analyze_task_structure(
     import os
     import numpy as np
     import pandas as pd
+    import polars as pl
 
     try:
         csv_dir = os.path.abspath(csv_dir)
@@ -82,15 +83,21 @@ def analyze_task_structure(
         if not os.path.exists(file_path):
             return {"status": "error", "error": f"Event table CSV not found: {file_path}"}
 
-        df = pd.read_csv(file_path)
+        # Read only the columns we need via polars, then convert to pandas
+        lf = pl.scan_csv(file_path, infer_schema_length=1000, try_parse_dates=True)
+        all_cols = lf.collect_schema().names()
 
-        if entity_col not in df.columns:
+        if entity_col not in all_cols:
             return {"status": "error", "error": f"Entity column '{entity_col}' not found in {event_table}.csv"}
-        if time_col not in df.columns:
+        if time_col not in all_cols:
             return {"status": "error", "error": f"Time column '{time_col}' not found in {event_table}.csv"}
 
-        df[time_col] = pd.to_datetime(df[time_col], errors='coerce')
+        # Load only key columns for temporal/entity analysis (fast)
+        df = lf.select([entity_col, time_col]).collect().to_pandas()
+        df[time_col] = pd.to_datetime(df[time_col], errors='coerce', format='mixed')
         df = df.dropna(subset=[time_col])
+        # Keep full column list for schema hints (from polars schema, no data load)
+        _all_event_cols = all_cols
 
         task_lower = task_description.lower()
         timedelta = pd.Timedelta(days=timedelta_days)
@@ -293,10 +300,10 @@ def analyze_task_structure(
         # ================================================================
         # Section 4: Schema Hints
         # ================================================================
-        event_table_cols = list(df.columns)
+        event_table_cols = list(_all_event_cols)
         potential_join_tables = []
         try:
-            event_col_set = set(df.columns)
+            event_col_set = set(_all_event_cols)
             for f in os.listdir(csv_dir):
                 if f.endswith('.csv'):
                     other_name = f.replace('.csv', '')
@@ -333,71 +340,93 @@ def analyze_task_structure(
         CARDINALITY_MIN = 2
         CARDINALITY_MAX = 20
 
-        def _profile_categorical_columns(table_df, table_name, exclude_cols):
+        def _profile_categorical_columns_polars(csv_path, table_name, exclude_cols, col_list=None):
+            """Profile low-cardinality columns using polars lazy scan."""
             profiles = []
-            for col in table_df.columns:
-                if col in exclude_cols:
-                    continue
-                try:
-                    n_unique = table_df[col].nunique()
-                except Exception:
-                    continue
-                if n_unique < CARDINALITY_MIN or n_unique > CARDINALITY_MAX:
-                    continue
-                vc = table_df[col].value_counts(dropna=False).head(20)
-                value_dist = {str(k): int(v) for k, v in vc.items()}
-                col_lower = col.lower()
-                is_type_col = any(sig in col_lower for sig in TYPE_NAME_SIGNALS)
-                profiles.append({
-                    "column": col,
-                    "table": table_name,
-                    "n_distinct": int(n_unique),
-                    "value_distribution": value_dist,
-                    "is_likely_type_column": is_type_col,
-                })
+            try:
+                _lf = pl.scan_csv(csv_path, infer_schema_length=500)
+                _cols = col_list or _lf.collect_schema().names()
+                for col in _cols:
+                    if col in exclude_cols:
+                        continue
+                    try:
+                        n_unique = _lf.select(pl.col(col).n_unique()).collect().item()
+                    except Exception:
+                        continue
+                    if n_unique < CARDINALITY_MIN or n_unique > CARDINALITY_MAX:
+                        continue
+                    vc = (
+                        _lf.select(pl.col(col))
+                        .group_by(col).len()
+                        .sort("len", descending=True)
+                        .head(20)
+                        .collect()
+                    )
+                    value_dist = {str(r[0]): int(r[1]) for r in vc.iter_rows()}
+                    col_lower = col.lower()
+                    is_type_col = any(sig in col_lower for sig in TYPE_NAME_SIGNALS)
+                    profiles.append({
+                        "column": col,
+                        "table": table_name,
+                        "n_distinct": int(n_unique),
+                        "value_distribution": value_dist,
+                        "is_likely_type_column": is_type_col,
+                    })
+            except Exception:
+                pass
             return profiles
 
         exclude_event = {entity_col, time_col}
-        event_cat_profiles = _profile_categorical_columns(df, event_table, exclude_event)
+        event_cat_profiles = _profile_categorical_columns_polars(
+            file_path, event_table, exclude_event, _all_event_cols
+        )
 
         entity_cat_profiles = []
         if entity_table and entity_source["has_dedicated_entity_table"]:
-            try:
-                ent_file = os.path.join(csv_dir, f"{entity_table}.csv")
-                ent_df = pd.read_csv(ent_file)
-                ent_pk = _find_entity_pk(ent_df, entity_col)
+            ent_file = os.path.join(csv_dir, f"{entity_table}.csv")
+            if os.path.exists(ent_file):
+                ent_pk = None
+                try:
+                    ent_cols = pl.scan_csv(ent_file, infer_schema_length=100).collect_schema().names()
+                    ent_pk = _find_entity_pk(pd.DataFrame(columns=ent_cols), entity_col)
+                except Exception:
+                    pass
                 exclude_ent = {ent_pk} if ent_pk else set()
                 if entity_creation_col:
                     exclude_ent.add(entity_creation_col)
-                entity_cat_profiles = _profile_categorical_columns(
-                    ent_df, entity_table, exclude_ent
+                entity_cat_profiles = _profile_categorical_columns_polars(
+                    ent_file, entity_table, exclude_ent
                 )
-            except Exception:
-                pass
 
         # ---- Sentinel value detection on entity ID columns ----
         sentinel_warnings = []
         if entity_table and entity_source["has_dedicated_entity_table"]:
             try:
                 ent_file = os.path.join(csv_dir, f"{entity_table}.csv")
-                ent_df = pd.read_csv(ent_file)
-                ent_pk = _find_entity_pk(ent_df, entity_col)
-                if ent_pk and ent_pk in ent_df.columns:
-                    id_series = ent_df[ent_pk]
-                    null_count = int(id_series.isna().sum())
+                _ent_lf = pl.scan_csv(ent_file, infer_schema_length=500)
+                _ent_schema = _ent_lf.collect_schema()
+                _ent_cols_list = _ent_schema.names()
+                ent_pk = _find_entity_pk(pd.DataFrame(columns=_ent_cols_list), entity_col)
+                if ent_pk and ent_pk in _ent_cols_list:
+                    _agg = _ent_lf.select(
+                        pl.col(ent_pk).null_count().alias("nulls"),
+                        pl.count().alias("total"),
+                    ).collect()
+                    null_count = _agg["nulls"][0]
+                    total = _agg["total"][0]
                     if null_count > 0:
                         sentinel_warnings.append({
                             "table": entity_table, "column": ent_pk,
-                            "issue": "null_entity_ids", "count": null_count,
+                            "issue": "null_entity_ids", "count": int(null_count),
                             "recommendation": f"Filter: {ent_pk} IS NOT NULL",
                         })
-                    if pd.api.types.is_numeric_dtype(id_series):
+                    if _ent_schema[ent_pk].is_numeric():
                         for sentinel in [-1, 0]:
-                            sc = int((id_series == sentinel).sum())
-                            if 0 < sc < len(id_series) * 0.1:
+                            sc = _ent_lf.filter(pl.col(ent_pk) == sentinel).select(pl.count()).collect().item()
+                            if 0 < sc < total * 0.1:
                                 sentinel_warnings.append({
                                     "table": entity_table, "column": ent_pk,
-                                    "issue": f"sentinel_value_{sentinel}", "count": sc,
+                                    "issue": f"sentinel_value_{sentinel}", "count": int(sc),
                                     "recommendation": f"Filter: {ent_pk} != {sentinel}",
                                 })
             except Exception:
@@ -778,12 +807,12 @@ def test_sql_query(
         
         conn = duckdb.connect(':memory:')
         
-        # Load all CSV files as tables
+        # Create views over CSV files (lazy -- avoids loading entire files into memory)
         for f in os.listdir(csv_dir):
             if f.endswith('.csv'):
                 table_name = f.replace('.csv', '')
                 file_path = os.path.join(csv_dir, f)
-                conn.execute(f"CREATE TABLE {table_name} AS SELECT * FROM read_csv_auto('{file_path}')")
+                conn.execute(f"CREATE VIEW {table_name} AS SELECT * FROM read_csv_auto('{file_path}')")
         
         # Create a data-aware dummy timestamp_df for SQL validation.
         # At runtime, the real timestamp_df will be provided by the task framework.
@@ -1145,33 +1174,55 @@ def validate_dataset_timestamps(
                 f"Fix: choose timestamps so that test_timestamp - val_timestamp >= {timedelta_days} days."
             )
 
-        # Check against actual data range if CSV files available
+        # Check against actual data range using polars lazy scan (fast)
         data_min_date = None
         data_max_date = None
         if csv_dir and os.path.exists(csv_dir):
+            import polars as pl
+            _dt_hints = ('date', 'time', 'created', 'updated', 'timestamp', 'modified')
             for f in os.listdir(csv_dir):
-                if f.endswith('.csv'):
-                    try:
-                        df = pd.read_csv(os.path.join(csv_dir, f))
-                        for col in df.columns:
-                            col_lower = col.lower()
-                            if col_lower.endswith('id') or col_lower == 'id':
+                if not f.endswith('.csv'):
+                    continue
+                try:
+                    lf = pl.scan_csv(os.path.join(csv_dir, f), infer_schema_length=1000, try_parse_dates=True)
+                    schema = lf.collect_schema()
+                    for col_name in schema.names():
+                        col_lower = col_name.lower()
+                        if col_lower.endswith('id') or col_lower == 'id':
+                            continue
+                        dt = schema[col_name]
+                        is_date = dt in (pl.Date, pl.Datetime) or str(dt).startswith("Datetime")
+                        if not is_date and not any(h in col_lower for h in _dt_hints):
+                            continue
+                        if is_date:
+                            agg = lf.select(
+                                pl.col(col_name).min().alias("mn"),
+                                pl.col(col_name).max().alias("mx"),
+                            ).collect()
+                            mn, mx = agg["mn"][0], agg["mx"][0]
+                            if mn is not None and mx is not None:
+                                mn_ts = pd.Timestamp(mn)
+                                mx_ts = pd.Timestamp(mx)
+                                if mn_ts.year >= 1900 and mx_ts.year <= 2100:
+                                    if data_min_date is None or mn_ts < data_min_date:
+                                        data_min_date = mn_ts
+                                    if data_max_date is None or mx_ts > data_max_date:
+                                        data_max_date = mx_ts
+                        else:
+                            sample = lf.select(pl.col(col_name).drop_nulls()).head(200).collect().to_series()
+                            if len(sample) == 0:
                                 continue
-                            try:
-                                dates = pd.to_datetime(df[col], errors='coerce')
-                                if dates.notna().sum() > len(df) * 0.5:
-                                    col_min = dates.min()
-                                    col_max = dates.max()
-                                    if pd.notna(col_min) and col_min.year >= 1900:
-                                        if data_min_date is None or col_min < data_min_date:
-                                            data_min_date = col_min
-                                    if pd.notna(col_max) and col_max.year <= 2100:
-                                        if data_max_date is None or col_max > data_max_date:
-                                            data_max_date = col_max
-                            except Exception:
-                                pass
-                    except Exception:
-                        pass
+                            parsed = pd.to_datetime(sample.to_pandas(), errors='coerce', format='mixed').dropna()
+                            if len(parsed) < len(sample) * 0.5:
+                                continue
+                            mn_ts, mx_ts = parsed.min(), parsed.max()
+                            if mn_ts.year >= 1900 and mx_ts.year <= 2100:
+                                if data_min_date is None or mn_ts < data_min_date:
+                                    data_min_date = mn_ts
+                                if data_max_date is None or mx_ts > data_max_date:
+                                    data_max_date = mx_ts
+                except Exception:
+                    pass
 
             if data_min_date and data_max_date:
                 if val_timestamp < data_min_date or val_timestamp > data_max_date:
