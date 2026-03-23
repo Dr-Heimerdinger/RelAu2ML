@@ -90,6 +90,7 @@ Use the decision table in Part 2 to make the final pattern choice. If the tool's
 test_sql_query("{csv_dir}", query)
 ```
 Verify the output columns are `[time_col, entity_col, target_col]` (or `[time_col, src_entity_col, dst_entity_col]` for link prediction). Verify row counts are non-zero.
+If `test_sql_query` returns `warnings` or `target_summary.unique_non_null <= 1`, treat it as a likely semantic bug and revise the SQL (commonly wrong categorical value mapping such as guessed labels that do not exist in CSV values).
 
 **Performance Note**: The training script enforces a 90-minute timeout for task.get_table() calls. If your query approaches this limit during testing, it will likely fail in production. Optimize using patterns from Part 8.5.
 
@@ -902,6 +903,7 @@ Must EXACTLY match the table key used in `db.table_dict`. This is the CSV filena
 13. **Empty eval tables / -inf metrics**: Always check `recommended_num_eval_timestamps` from `analyze_task_structure()`. If it says 40, you MUST set `num_eval_timestamps = 40`. Without it, sparse/seasonal data produces empty val/test tables → 0 predictions → -inf metrics. This is the #1 cause of silent training failures.
 14. **Missing categorical filters**: When entity or event tables have low-cardinality "type" columns (PostTypeId, VoteTypeId, StatusId, outcome_type), failing to filter by the relevant type produces a training table with mixed entity/event subtypes and inflated row counts. Always check `schema_hints.categorical_columns` from `analyze_task_structure()` and add WHERE filters for the task-relevant values. Also check `schema_hints.sentinel_warnings` for entity ID sentinel values (-1, NULL) that should be excluded.
 15. **Missing CreationDate gate in link prediction**: When `building_blocks.creation_date_gate` reports entity tables with creation dates, you MUST add LEFT JOIN + `creation_date <= t.timestamp` filters to ensure only entities that existed before the prediction window are included. Without this, the model predicts links to/from entities that do not yet exist, producing inflated row counts and mismatched training tables vs author ground truth.
+16. **Guessed categorical literals**: Never invent semantic labels (e.g., `'Primary Outcome'`) unless they appear exactly in `schema_hints.categorical_columns[*].value_distribution`. Always copy categorical filter values verbatim from observed data.
 
 ---
 

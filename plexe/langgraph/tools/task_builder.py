@@ -375,6 +375,29 @@ def analyze_task_structure(
             except Exception:
                 pass
 
+        # Profile likely join tables as well (for categorical filters such as
+        # outcomes.outcome_type). Without this, the model may infer a semantic
+        # label (e.g., "Primary Outcome") that does not exist in raw data
+        # (e.g., "Primary").
+        join_cat_profiles = []
+        for jt in potential_join_tables:
+            jt_name = jt.get("table")
+            if not jt_name or jt_name in {event_table, entity_table}:
+                continue
+            try:
+                jt_file = os.path.join(csv_dir, f"{jt_name}.csv")
+                if not os.path.exists(jt_file):
+                    continue
+                # Sampling keeps analysis responsive on very large tables while
+                # still surfacing low-cardinality type columns reliably.
+                jt_df = pd.read_csv(jt_file, nrows=200_000)
+                join_exclude = set(jt.get("shared_columns_with_event", []))
+                join_cat_profiles.extend(
+                    _profile_categorical_columns(jt_df, jt_name, join_exclude)
+                )
+            except Exception:
+                pass
+
         # ---- Sentinel value detection on entity ID columns ----
         sentinel_warnings = []
         if entity_table and entity_source["has_dedicated_entity_table"]:
@@ -427,7 +450,7 @@ def analyze_task_structure(
             "event_table_columns": event_table_cols,
             "entity_table_columns": entity_table_cols,
             "potential_join_tables": potential_join_tables,
-            "categorical_columns": event_cat_profiles + entity_cat_profiles,
+            "categorical_columns": event_cat_profiles + entity_cat_profiles + join_cat_profiles,
             "sentinel_warnings": sentinel_warnings,
         }
 
@@ -637,6 +660,7 @@ def analyze_task_structure(
                 "Low-cardinality type/category columns detected in entity or event tables. "
                 "Review schema_hints.categorical_columns to determine if the task requires "
                 "filtering by specific values (e.g., only questions, only upvotes, only primary outcomes). "
+                "Use exact raw values from value_distribution (do not paraphrase values). "
                 "Also check schema_hints.sentinel_warnings for entity ID sentinel values to exclude."
                 if (_has_categorical or sentinel_warnings)
                 else None
@@ -883,12 +907,45 @@ def test_sql_query(
         conn.register("timestamp_df", timestamps_dummy)
         
         result = conn.execute(query).fetchdf()
-        
+
+        warnings: List[str] = []
+        target_summary: Dict[str, Any] | None = None
+        if len(result.columns) >= 3 and len(result) > 0:
+            target_col = result.columns[2]
+            target_series = result[target_col]
+            non_null = target_series.dropna()
+            unique_non_null = int(non_null.nunique()) if len(non_null) > 0 else 0
+            target_summary = {
+                "target_col": target_col,
+                "non_null_count": int(len(non_null)),
+                "unique_non_null": unique_non_null,
+            }
+
+            if unique_non_null <= 1:
+                warnings.append(
+                    f"Target column '{target_col}' appears single-class in SQL test output "
+                    f"(unique_non_null={unique_non_null}). This often indicates an incorrect categorical "
+                    "filter/value mapping or overly restrictive WHERE conditions."
+                )
+
+            # Binary-focused check when values look like 0/1 or bool.
+            try:
+                uniques = set(non_null.astype(str).str.lower().unique().tolist())
+                binary_tokens = {"0", "1", "true", "false"}
+                if uniques and uniques.issubset(binary_tokens) and len(uniques) == 1:
+                    warnings.append(
+                        f"Binary-like target '{target_col}' has only one class ({next(iter(uniques))}) in sample output."
+                    )
+            except Exception:
+                pass
+
         return {
             "status": "success",
             "columns": list(result.columns),
             "row_count": len(result),
-            "sample_data": result.head(10).to_dict(orient='records')
+            "sample_data": result.head(10).to_dict(orient='records'),
+            "warnings": warnings,
+            "target_summary": target_summary,
         }
     except Exception as e:
         return {
