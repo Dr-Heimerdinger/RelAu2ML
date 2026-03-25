@@ -411,12 +411,12 @@ def analyze_task_structure(
                 jt_file = os.path.join(csv_dir, f"{jt_name}.csv")
                 if not os.path.exists(jt_file):
                     continue
-                # Sampling keeps analysis responsive on very large tables while
-                # still surfacing low-cardinality type columns reliably.
-                jt_df = pd.read_csv(jt_file, nrows=200_000)
                 join_exclude = set(jt.get("shared_columns_with_event", []))
+                jt_cols = jt.get("columns")
                 join_cat_profiles.extend(
-                    _profile_categorical_columns(jt_df, jt_name, join_exclude)
+                    _profile_categorical_columns_polars(
+                        jt_file, jt_name, join_exclude, jt_cols
+                    )
                 )
             except Exception:
                 pass
@@ -1118,6 +1118,22 @@ def register_task_code(
                         match.group(0),
                         match.group(0) + f"\n{indent}num_eval_timestamps = 40",
                     )
+
+    import re
+
+    if re.search(r"class\s+GenTask\s*\(\s*RecommendationTask\s*\)", sanitized_code):
+        _ne_re = re.compile(
+            r"^([ \t]*)num_eval_timestamps\s*=\s*(\d+)\s*$",
+            re.MULTILINE,
+        )
+
+        def _rec_ne_fix(m):
+            indent, val = m.group(1), m.group(2)
+            if int(val) != 1:
+                return f"{indent}num_eval_timestamps = 1"
+            return m.group(0)
+
+        sanitized_code = _ne_re.sub(_rec_ne_fix, sanitized_code)
 
     with open(file_path, 'w') as f:
         f.write(sanitized_code)

@@ -282,6 +282,8 @@ You CANNOT proceed without dataset.py. Report this error.
 - analyze_task_structure("{csv_dir}", event_table, entity_col, time_col, timedelta_days, task_description, entity_table)
 - test_sql_query("{csv_dir}", query)
 - register_task_code(code, "GenTask", "{working_dir}/task.py", task_type)
+
+Reminders: CTR and in-window **counts/rates** are REGRESSION. Churn-style Pattern A can be hybridized with SUM/COUNT in the forward window. Match `entity_col` to the SQL output alias. `RecommendationTask`: `num_eval_timestamps` must stay 1 only.
 """)
         
         return "\n".join(context_parts)

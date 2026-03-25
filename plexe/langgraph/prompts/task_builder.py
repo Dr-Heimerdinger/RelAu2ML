@@ -18,6 +18,9 @@ Description signals:
 - "list of items", "recommend", "which items" -> LINK_PREDICTION
 
 Key: "predict if" / "whether" = BINARY (IF(COUNT>=1,1,0)), not REGRESSION.
+Exception: predicting a **count or total in the window** (events attended, RSVPs, clicks in window) is REGRESSION even if the prose says "predict".
+
+Social/event: attendance counts, RSVP volume, "how many events" -> EntityTask (REGRESSION or BINARY), not Link unless the target is explicitly a **ranked list of other entities** to recommend.
 
 ---
 
@@ -78,15 +81,6 @@ If `test_sql_query` returns `warnings` or `target_summary.unique_non_null <= 1`,
 ```
 register_task_code(code, "GenTask", "{working_dir}/task.py", task_type)
 ```
-1. Determine task type (Part 1).
-2. Validate timestamps: validate_dataset_timestamps(dataset_file, csv_dir, timedelta_days).
-   If invalid, fix with fix_dataset_timestamps().
-3. Choose base class: EntityTask (regression/classification) or RecommendationTask (link prediction).
-4. Call analyze_task_structure(csv_dir, event_table, entity_col, time_col, timedelta_days, task_description, entity_table).
-   Review: entity_source, temporal, pattern_candidates, building_blocks, schema_hints.
-5. Design SQL using selected pattern (Part 4). Use building blocks if needed (CTE, quality filters, creation gate).
-6. Test: test_sql_query(csv_dir, query). Verify output columns and non-zero rows.
-7. Save: register_task_code(code, "GenTask", working_dir/task.py, task_type).
 
 ---
 
@@ -105,6 +99,7 @@ WHERE EXISTS (
     AND e.time_col > timestamp - INTERVAL '{self.timedelta}' AND e.time_col <= timestamp
 )
 ```
+Hybrid: same **activity EXISTS** (prior window) gate, but replace the target expression with **SUM/COUNT/AVG** over events in `(timestamp, timestamp + timedelta]` when the metric is numeric in-window (e.g. LTV, event counts), not churn.
 
 ### Pattern B -- Sparse Events (data-driven lookback)
 ```sql
@@ -262,13 +257,15 @@ class GenTask(RecommendationTask):
 - `make_table` signature: `(self, db: Database, timestamps: "pd.Series[pd.Timestamp]") -> Table`
 - Must return `Table(df=df, fkey_col_to_pkey_table=..., pkey_col=None, time_col=self.time_col)`
 - `timestamp_df = pd.DataFrame({"timestamp": timestamps})` -- use the framework-provided timestamps.
+- **`entity_col` / `src_entity_col` / `dst_entity_col` must match the column name in the SELECT output** (e.g. `user_id AS user` -> `entity_col = "user"`). Mismatch yields silent empty or wrong keys.
+- Avoid redundant `CAST(... AS TIMESTAMP)` on columns DuckDB already reads as timestamps; keep filters on native time types when possible.
 
 ---
 
 ## Part 6 -- Parameters
 
 - **timedelta**: 4-7d (daily events), 30d (weekly), 60-90d (monthly), 365d (rare). Must be <= val/test gap.
-- **num_eval_timestamps**: Set to 40 when analyze_task_structure() recommends it (sparse/seasonal data). Omit otherwise.
+- **num_eval_timestamps**: **EntityTask only.** Set to 40 when analyze_task_structure() recommends it (sparse/seasonal data). Omit otherwise. **`RecommendationTask` must use `num_eval_timestamps = 1` only** (RelBench constraint); do not copy 40 from F1-style tasks.
 - **eval_k**: Link prediction only. Typical: 10-12.
 - **Column names**: MUST exactly match CSV columns including case. Verify with get_csv_files_info().
 - **entity_table**: MUST match CSV filename without .csv, preserving case.
@@ -286,7 +283,7 @@ class GenTask(RecommendationTask):
 6. Binary vs regression confusion: "predict if" = BINARY, "how many" = REGRESSION.
 7. Missing categorical filters -> mixed subtypes, inflated rows.
 8. Missing CreationDate gate in link prediction -> predicting links to non-existent entities.
-9. num_eval_timestamps=40 needed for sparse data -> empty eval tables without it.
+9. For **EntityTask** only: num_eval_timestamps=40 when the tool recommends it for sparse data; empty eval without it. Never apply 40 to **RecommendationTask**.
 10. For large datasets (1M+ rows): use EXISTS over IN, aggregate early, avoid cartesian products.
 16. **Guessed categorical literals**: Never invent semantic labels (e.g., `'Primary Outcome'`) unless they appear exactly in `schema_hints.categorical_columns[*].value_distribution`. Always copy categorical filter values verbatim from observed data.
 
