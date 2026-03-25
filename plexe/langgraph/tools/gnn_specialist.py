@@ -62,11 +62,12 @@ def generate_training_script(
 
     working_dir = os.path.abspath(working_dir)
     
-    # Use csv_dir from parameter or default to working_dir/csv_files
-    if csv_dir is None:
+    # Use csv_dir from parameter or default to working_dir/csv_files.
+    # The agent may pass literal strings like "None"/"null" - treat them as missing.
+    if csv_dir is None or str(csv_dir).strip().lower() in {"", "none", "null"}:
         csv_dir = f"{working_dir}/csv_files"
     else:
-        csv_dir = os.path.abspath(csv_dir)
+        csv_dir = os.path.abspath(str(csv_dir))
 
     if not os.path.isdir(csv_dir):
         return {

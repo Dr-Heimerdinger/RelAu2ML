@@ -11,7 +11,7 @@ import os
 import re
 from typing import Dict, Any, List, Optional
 from mcp.server.fastmcp import FastMCP
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, ConfigDict, model_validator
 import requests
 import xml.etree.ElementTree as ET
 
@@ -21,8 +21,15 @@ mcp = FastMCP("HPO Search")
 
 class HyperparameterConfig(BaseModel):
     """Hyperparameter configuration from a single source."""
-    hyperparameters: Dict[str, Any] = Field(
-        description="Dictionary of hyperparameter names to values"
+    model_config = ConfigDict(extra="allow")
+
+    # Be permissive about input shape: different MCP tools may return either:
+    # - {"hyperparameters": {...}, "source": "..."}
+    # - a flat hyperparameter dict with "source" alongside
+    # - nested keys like {"aggregated_hyperparameters": {...}, "source": "..."}
+    hyperparameters: Optional[Dict[str, Any]] = Field(
+        default=None,
+        description="Dictionary of hyperparameter names to values",
     )
     source: str = Field(
         default="unknown",
@@ -32,6 +39,76 @@ class HyperparameterConfig(BaseModel):
         default=None,
         description="Confidence level of this configuration"
     )
+
+    @model_validator(mode="before")
+    @classmethod
+    def _coerce_hyperparameters(cls, data):
+        if not isinstance(data, dict):
+            return data
+
+        # 1) Already in expected shape
+        if "hyperparameters" in data and isinstance(data.get("hyperparameters"), dict):
+            return data
+
+        # 2) Common nested output shapes from other tools
+        for nested_key in (
+            "aggregated_hyperparameters",
+            "recommended_hyperparameters",
+            "extracted_hyperparameters",
+        ):
+            nested_val = data.get(nested_key)
+            if isinstance(nested_val, dict) and nested_val:
+                data["hyperparameters"] = nested_val
+                return data
+
+        # 3) Flat dict: treat any non-metadata keys as hyperparameters
+        meta_keys = {
+            "source",
+            "confidence",
+            "reasoning",
+            "strategy",
+            "num_sources",
+            "num_papers",
+            "papers_analyzed",
+            "papers_with_hyperparams",
+            "papers_analyzed_count",
+            "hyperparameters_found",
+            "extracted_hyperparameters_found",
+            "benchmark_papers",
+            "benchmarks_referenced",
+            "confidence_level",
+            "source_paper",
+            "title",
+            "summary_preview",
+            "url",
+            "conference",
+            "papers",
+            "source_url",
+            "error",
+        }
+
+        known_hp_keys = {
+            "hidden_channels",
+            "batch_size",
+            "learning_rate",
+            "num_gnn_layers",
+            "num_layers",
+            "epochs",
+            "tune_metric",
+            "higher_is_better",
+            "dropout",
+            "optimizer",
+            "out_channels",
+        }
+
+        candidates = {k: v for k, v in data.items() if k not in meta_keys}
+        if any(k in known_hp_keys for k in candidates.keys()):
+            data["hyperparameters"] = candidates
+            return data
+
+        # If we can't confidently infer hyperparameters, keep as-is (validation will
+        # allow hyperparameters=None and compare_* will skip it safely).
+        return data
 
 
 @mcp.tool()
@@ -332,8 +409,9 @@ def compare_hyperparameter_configs(
     for config in configs:
         # Handle both Pydantic models and dicts
         config_dict = config.model_dump() if hasattr(config, 'model_dump') else config
-        if "hyperparameters" in config_dict:
-            all_hyperparams.append(config_dict["hyperparameters"])
+        hp = config_dict.get("hyperparameters")
+        if isinstance(hp, dict) and hp:
+            all_hyperparams.append(hp)
             sources.append(config_dict.get("source", "unknown"))
     
     if not all_hyperparams:
