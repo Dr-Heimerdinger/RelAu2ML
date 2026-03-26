@@ -173,7 +173,7 @@ class ConversationalAgent(BaseAgent):
         for msg in state.get("messages", []):
             content = msg.get("content", "")
             content_lower = content.lower()
-            if "predict" not in content_lower and "forecast" not in content_lower:
+            if not any(kw in content_lower for kw in ["predict", "forecast", "recommend", "which"]):
                 continue
 
             intent["prediction_target"] = content[:200]
@@ -182,6 +182,11 @@ class ConversationalAgent(BaseAgent):
             # Order matters: longer / more specific tokens first so that
             # e.g. "auroc" is tried before "auc".
             metric_map = [
+                ("area under the receiver operating characteristic", "AUROC"),
+                ("area under the receiver", "AUROC"),
+                ("mean absolute error", "MAE"),
+                ("root mean square error", "RMSE"),
+                ("root mean squared error", "RMSE"),
                 ("auroc", "AUROC"), ("roc_auc", "ROC-AUC"),
                 ("roc-auc", "ROC-AUC"), ("roc auc", "ROC-AUC"),
                 ("mean absolute", "MAE"), ("root mean", "RMSE"),

@@ -1004,7 +1004,8 @@ def register_task_code(
     """
     import os
     import ast
-    
+    import re
+
     # Normalize the file path
     file_path = os.path.normpath(os.path.abspath(file_path))
     
@@ -1047,6 +1048,26 @@ def register_task_code(
             "error": "Link prediction task must inherit RecommendationTask, not EntityTask. "
                      "Fix the class declaration and re-register.",
         }
+
+    if task_type != "link_prediction" and re.search(
+        r"class\s+GenTask\s*\(\s*RecommendationTask\s*\)", sanitized_code
+    ):
+        return {
+            "status": "error",
+            "error": "Non-link task types must inherit EntityTask, not RecommendationTask. "
+                     "Use EntityTask with columns [time_col, entity_col, target_col] for "
+                     "binary/regression/multiclass. Re-register with the correct base class.",
+        }
+
+    if task_type == "binary_classification":
+        metric_names = re.findall(
+            r"\b(roc_auc|average_precision|accuracy|f1|ap|auroc)\b", sanitized_code
+        )
+        if not metric_names:
+            syntax_warnings.append(
+                "Binary classification tasks usually need metrics including roc_auc, "
+                "average_precision, accuracy, or f1 in `metrics = [...]` for evaluation."
+            )
 
     if task_type == "link_prediction" and "eval_k" not in sanitized_code:
         import re
@@ -1118,8 +1139,6 @@ def register_task_code(
                         match.group(0),
                         match.group(0) + f"\n{indent}num_eval_timestamps = 40",
                     )
-
-    import re
 
     if re.search(r"class\s+GenTask\s*\(\s*RecommendationTask\s*\)", sanitized_code):
         _ne_re = re.compile(

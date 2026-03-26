@@ -6,20 +6,24 @@ WORKDIR /app
 # System dependencies
 # ----------------------------
 RUN apt-get update && apt-get install -y --no-install-recommends \
-    python3.11 \
-    python3.11-dev \
-    python3.11-venv \
+    python3 \
+    python3-dev \
+    python3-venv \
     python3-pip \
     git \
     curl \
     build-essential \
     ca-certificates \
     && rm -rf /var/lib/apt/lists/*
+
+# Avoid PEP 668 "externally-managed-environment" by using a venv.
+RUN python3 -m venv /opt/venv
+ENV PATH="/opt/venv/bin:$PATH"
  
 # ----------------------------
 # Install uv (fast Python package manager)
 # ----------------------------
-RUN pip install --no-cache-dir uv
+RUN python -m pip install --no-cache-dir uv
  
 # ----------------------------
 # Environment variables
@@ -27,7 +31,6 @@ RUN pip install --no-cache-dir uv
 ENV PYTHONUNBUFFERED=1 \
     PIP_DEFAULT_TIMEOUT=100 \
     PIP_RETRIES=5 \
-    UV_SYSTEM_PYTHON=1 \
     UV_NO_CACHE=1
  
 # ----------------------------
@@ -41,12 +44,16 @@ COPY pyproject.toml README.md ./
 # Tạo stub trước để Docker layer cache hoạt động khi chỉ pyproject.toml thay đổi
 # ----------------------------
 RUN mkdir -p plexe && touch plexe/__init__.py
+#
+# IMPORTANT: Keep CUDA runtime compatible with host driver (CUDA 12.8 here).
+# Without pinning, installing torchvision/torchaudio can upgrade torch to cu130,
+# which will fail on a CUDA 12.8 driver and silently force CPU.
+#
+RUN uv pip install --index-url https://download.pytorch.org/whl/cu128 \
+    "torch==2.10.0+cu128" \
+    "torchvision==0.25.0+cu128" \
+    "torchaudio==2.10.0+cu128"
 RUN uv pip install ".[transformers,chatui]"
- 
-# ----------------------------
-# BƯỚC 3: Cài torchvision, torchaudio (torch đã có sẵn từ base image)
-# ----------------------------
-RUN uv pip install torchvision torchaudio
  
 # ----------------------------
 # BƯỚC 4: PyTorch Geometric dependencies (dùng pip vì PyG wheel index)
@@ -57,11 +64,8 @@ RUN uv pip install pyg_lib torch_scatter torch_sparse torch_cluster torch_spline
  
 # ----------------------------
 # BƯỚC 5: Extra packages không có trong pyproject.toml
-# NOTE: pytorch-frame đã được cài ở bước 2 từ pyproject.toml.
-# Do NOT install "torch-frame" — đó là package khác, sẽ overwrite pytorch-frame.
-# torch-geometric và sentence-transformers cũng đã được cài ở bước 2.
 # ----------------------------
-RUN uv pip install tensorboard torchvision torchaudio
+RUN uv pip install tensorboard
  
 # ----------------------------
 # Source code

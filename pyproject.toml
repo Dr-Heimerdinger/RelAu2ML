@@ -23,7 +23,7 @@ keywords = ["agent", "custom ai", "llm", "machine learning", "data generation"]
 dependencies = [
     "python-dotenv>=1.2.0,<2",
     "pandas>=1.5.0,<3",
-    "polars>=1.0.0,<2",
+    "polars",
     "imbalanced-learn>=0.12.4,<1",
     "pydantic>=2.9.2,<3",
     "scikit-learn>=1.6.1,<2",

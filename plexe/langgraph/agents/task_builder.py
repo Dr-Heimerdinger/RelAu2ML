@@ -91,7 +91,23 @@ class TaskBuilderAgent(BaseAgent):
                     for tr in self._last_tool_results:
                         tool_context += f"\n--- {tr['tool_name']} ---\n{tr['content']}\n"
 
-                retry_message = self._build_retry_message(working_dir, tool_context)
+                # Extract expected type and metric for retry message
+                intent = state.get("user_intent", {})
+                expected_type = "binary_classification"
+                metric = ""
+                if isinstance(intent, dict):
+                    metric = intent.get("evaluation_metric", "")
+                    # Reuse internal logic instead of duplicating
+                    if metric:
+                        m_low = metric.lower().replace("-", "_").replace(" ", "_")
+                        if m_low in {"mae", "rmse", "r2", "mse"}: expected_type = "regression"
+                        elif m_low in {"auroc", "auc", "roc_auc", "f1", "accuracy", "ap", "average_precision"}: expected_type = "binary_classification"
+                        elif m_low in {"map", "precision_at_k", "recall_at_k", "map@k", "precision@k", "recall@k"}: expected_type = "link_prediction"
+                        else: expected_type = intent.get("task_type", "binary_classification")
+                    else:
+                        expected_type = intent.get("task_type", "binary_classification")
+
+                retry_message = self._build_retry_message(working_dir, tool_context, expected_type, metric)
 
                 # Update messages in state for retry
                 messages = state.get("messages", [])
@@ -104,24 +120,44 @@ class TaskBuilderAgent(BaseAgent):
         # All retries exhausted, return the last result (which has error)
         return result
 
-    def _build_retry_message(self, working_dir: str, tool_context: str = "") -> str:
+    def _build_retry_message(self, working_dir: str, tool_context: str = "",
+                             expected_type: str = "", metric: str = "") -> str:
         """Build a retry message to force agent to complete the task."""
+        # Determine requirements based on expected_type
+        base_class = "RecommendationTask" if expected_type == "link_prediction" else "EntityTask"
+
+        task_type_const = {
+            "binary_classification": "TaskType.BINARY_CLASSIFICATION",
+            "regression": "TaskType.REGRESSION",
+            "link_prediction": "TaskType.LINK_PREDICTION"
+        }.get(expected_type, "TaskType.BINARY_CLASSIFICATION")
+
+        metrics_required = {
+            "binary_classification": "[roc_auc, average_precision, f1, accuracy]",
+            "regression": "[mae, rmse, r2]",
+            "link_prediction": "[link_prediction_map, link_prediction_precision, link_prediction_recall]"
+        }.get(expected_type, "[]")
+
         return f"""
 CRITICAL: YOU DID NOT COMPLETE YOUR TASK!
 
-The file {working_dir}/task.py does NOT exist.
-You MUST call register_task_code() to create this file.
+The file {working_dir}/task.py does NOT exist or has the WRONG task type.
+
+MANDATORY REQUIREMENTS:
+1. Task Type: task_type = {task_type_const}
+2. Base Class: class GenTask({base_class}):
+3. Metrics: metrics = {metrics_required}
+4. User requested metric: {metric or 'Not specified'}
 
 DO NOT re-call tools you already used — their results are below.
-DO NOT analyze again. DO NOT explain. Just execute these steps NOW:
+DO NOT change the task type — use EXACTLY {expected_type}.
 
-1. Generate the complete GenTask class code with SQL query
-2. Call register_task_code(code, "GenTask", "{working_dir}/task.py", task_type)
+Just execute these steps NOW:
+1. Generate the complete GenTask class inheriting from {base_class}
+2. Set task_type = {task_type_const}
+3. Include metrics = {metrics_required}
+4. Call register_task_code(code, "GenTask", "{working_dir}/task.py", "{expected_type}")
 
-Your response MUST include a tool call to register_task_code.
-If you do not call this tool, you have FAILED completely.
-
-EXECUTE THE TOOL CALL NOW.
 {tool_context}
 """
     
@@ -165,26 +201,40 @@ You CANNOT proceed without dataset.py. Report this error.
         # User intent analysis
         if state.get("user_intent"):
             intent = state["user_intent"]
-            context_parts.append("\n## User Intent:")
-            if isinstance(intent, dict):
-                pred_target = intent.get('prediction_target', 'unknown')
-                task_type = intent.get('task_type', 'unknown')
-                eval_metric = intent.get('evaluation_metric')
-                context_parts.append(f"  - Prediction target: {pred_target}")
-                context_parts.append(f"  - Task type: {task_type}")
-                if eval_metric:
-                    context_parts.append(f"  - User's evaluation metric: {eval_metric}")
+            pred_target = intent.get('prediction_target', '')
+            eval_metric = intent.get('evaluation_metric', '')
 
-                # Suggest appropriate metrics
-                if 'binary' in str(task_type).lower() or 'classification' in str(task_type).lower():
-                    context_parts.append(f"  - Suggested metrics: average_precision, accuracy, f1, roc_auc")
-                elif 'regression' in str(task_type).lower():
-                    context_parts.append(f"  - Suggested metrics: mae, rmse, r2")
-                elif 'link' in str(task_type).lower() or 'recommendation' in str(task_type).lower():
-                    context_parts.append(f"  - Suggested metrics: link_prediction_map, link_prediction_precision, link_prediction_recall")
-                    context_parts.append(f"  - Use RecommendationTask base class with eval_k parameter")
-            else:
-                context_parts.append(f"  - Intent: {intent}")
+            # CRITICAL: Determine final task_type based on metric FIRST
+            task_type = intent.get('task_type', 'binary_classification')
+
+            if eval_metric:
+                metric_lower = eval_metric.lower().replace("-", "_").replace(" ", "_")
+
+                # Metric ALWAYS overrides keyword-based task_type
+                if metric_lower in {"mae", "rmse", "r2", "mse"}:
+                    task_type = "regression"
+                    logger.info(f"Metric {eval_metric} -> forcing task_type=regression")
+                elif metric_lower in {"auroc", "auc", "roc_auc", "f1", "accuracy", "ap", "average_precision"}:
+                    task_type = "binary_classification"
+                    logger.info(f"Metric {eval_metric} -> forcing task_type=binary_classification")
+                elif metric_lower in {"map", "precision_at_k", "recall_at_k", "map@k", "precision@k", "recall@k"}:
+                    task_type = "link_prediction"
+                    logger.info(f"Metric {eval_metric} -> forcing task_type=link_prediction")
+
+            # Build CONSISTENT context with ONLY the resolved task_type
+            context_parts.append(f"\nUser Intent (MANDATORY TO FOLLOW):")
+            context_parts.append(f"  - Prediction target: {pred_target}")
+            context_parts.append(f"  - REQUIRED task type: {task_type}")
+            context_parts.append(f"  - REQUIRED evaluation metric: {eval_metric}")
+            context_parts.append(f"  - REQUIRED base class: {'EntityTask' if task_type != 'link_prediction' else 'RecommendationTask'}")
+
+            # Only suggest metrics that match the FINAL task_type
+            if task_type == "binary_classification":
+                context_parts.append(f"  - You MUST use these metrics: [roc_auc, average_precision, f1, accuracy]")
+            elif task_type == "regression":
+                context_parts.append(f"  - You MUST use these metrics: [mae, rmse, r2]")
+            elif task_type == "link_prediction":
+                context_parts.append(f"  - You MUST use these metrics: [link_prediction_map, link_prediction_precision, link_prediction_recall]")
         
         # Schema information
         if state.get("schema_info"):
@@ -373,6 +423,14 @@ Reminders: CTR and in-window **counts/rates** are REGRESSION. Churn-style Patter
                         expected_type = "binary_classification"
                     elif metric in link_metrics:
                         expected_type = "link_prediction"
+            
+            logger.info(f"""
+Task Type Decision Trail:
+1. User intent task_type (from keywords): {intent.get('task_type')}
+2. User evaluation_metric: {intent.get('evaluation_metric')}
+3. Metric-inferred type: {expected_type}
+4. Final decision: {expected_type}
+""")
             # Validate: the generated file's task_type must match the
             # user's intent.  If the LLM wrote the wrong type, flag an
             # error so the retry loop can fix it.
@@ -380,6 +438,33 @@ Reminders: CTR and in-window **counts/rates** are REGRESSION. Churn-style Patter
             task_info["task_type"] = file_type or expected_type
             if file_type and file_type != expected_type:
                 base_class = self._read_base_class_from_file(task_path)
+                # Never trust link prediction output when the user/metric asked for an
+                # entity-level task (binary/regression/multiclass), and vice versa.
+                entity_like_expected = expected_type in {
+                    "binary_classification",
+                    "regression",
+                    "multiclass_classification",
+                    "multilabel_classification",
+                }
+                hard_mismatch = (
+                    (entity_like_expected and file_type == "link_prediction")
+                    or (expected_type == "link_prediction" and file_type != "link_prediction")
+                )
+                if hard_mismatch:
+                    mismatch_msg = (
+                        f"Task shape mismatch: generated task is '{file_type}' "
+                        f"(base class '{base_class}') but user intent/metric implies "
+                        f"'{expected_type}'. Example: AUROC requires EntityTask binary "
+                        f"output [timestamp, entity, target], not RecommendationTask. "
+                        f"Deleting task.py to force a retry."
+                    )
+                    logger.error(mismatch_msg)
+                    os.remove(task_path)
+                    base_result["active_errors"] = [mismatch_msg]
+                    base_result["error_history"] = [mismatch_msg]
+                    base_result["current_phase"] = PipelinePhase.TASK_BUILDING.value
+                    return base_result
+
                 file_consistent = (
                     (file_type == "link_prediction" and base_class == "RecommendationTask")
                     or (file_type != "link_prediction" and base_class == "EntityTask")
