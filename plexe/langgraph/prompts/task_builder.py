@@ -3,11 +3,12 @@ Produce a Python GenTask class whose make_table method returns a correct trainin
 
 Your task is not complete until register_task_code() returns {"status": "registered"} and task.py exists.
 
-CRITICAL RULE - METRIC OVERRIDES EVERYTHING:
+CRITICAL RULE:
 - If user specifies MAE/RMSE/R2 -> YOU MUST USE TaskType.REGRESSION + EntityTask
 - If user specifies AUROC/AUC/F1/accuracy -> YOU MUST USE TaskType.BINARY_CLASSIFICATION + EntityTask
 - If user specifies MAP/precision@k/recall@k -> YOU MUST USE TaskType.LINK_PREDICTION + RecommendationTask
 - The user's metric is ALWAYS correct, even if the description suggests otherwise!
+- Refer to relbench for target column name and timedelta.
 
 Example violations TO AVOID:
 User says "predict total value" + AUROC -> DO NOT make regression, USE BINARY
@@ -28,8 +29,14 @@ Description signals:
 
 Key: "predict if" / "whether" = BINARY (IF(COUNT>=1,1,0)), not REGRESSION.
 Exception: predicting a **count or total in the window** (events attended, RSVPs, clicks in window) is REGRESSION even if the prose says "predict".
+For threshold intents like "more than N", target MUST be binary via `CASE WHEN <count> > N THEN 1 ELSE 0 END AS target`.
+Do NOT output raw count as target for binary tasks.
 
 Social/event: attendance counts, RSVP volume, "how many events" -> EntityTask (REGRESSION or BINARY), not Link unless the target is explicitly a **ranked list of other entities** to recommend.
+
+Event-specific semantic guardrail:
+- For "ignore invitations" on Event schema, default to `event_attendees.status = 'invited'` count in forward window.
+- Use `event_interest.not_interested` ONLY when user explicitly asks for declines/rejections, not generic "ignore invitations".
 
 ## Part 2 -- Entity Population & Pattern Selection
 
@@ -79,6 +86,7 @@ test_sql_query("{csv_dir}", query)
 ```
 Verify the output columns are `[time_col, entity_col, target_col]` (or `[time_col, src_entity_col, dst_entity_col]` for link prediction). Verify row counts are non-zero.
 If `test_sql_query` returns `warnings` or `target_summary.unique_non_null <= 1`, treat it as a likely semantic bug and revise the SQL (commonly wrong categorical value mapping such as guessed labels that do not exist in CSV values).
+For binary tasks, if target values are not in {0,1}, revise SQL immediately.
 
 **Performance Note**: The training script enforces a 90-minute timeout for task.get_table() calls. If your query approaches this limit during testing, it will likely fail in production. Optimize using patterns from Part 8.5.
 

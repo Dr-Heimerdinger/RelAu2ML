@@ -242,6 +242,39 @@ You CANNOT proceed without dataset.py. Report this error.
             context_parts.append("\n## Schema Information:")
             tables = list(schema.get("tables", {}).keys())
             context_parts.append(f"Available tables: {', '.join(tables)}")
+
+            # Ground task generation to known canonical RelBench tasks when the
+            # schema strongly matches a built-in dataset. This reduces semantic
+            # drift in target definitions.
+            table_set = set(tables)
+            if {"users", "events", "event_attendees", "event_interest", "user_friends"}.issubset(table_set):
+                context_parts.append(
+                    "Canonical reference detected: Event dataset. If user intent matches, "
+                    "mirror logic from plexe/relbench/tasks/event.py (UserAttendanceTask, "
+                    "UserRepeatTask, UserIgnoreTask). For UserIgnoreTask semantics, use "
+                    "event_attendees.status='invited' with threshold (>2), not event_interest.not_interested "
+                    "unless the user explicitly asks to predict declines/not_interested."
+                )
+            elif {"users", "posts", "votes", "comments", "badges"}.issubset(table_set):
+                context_parts.append(
+                    "Canonical reference detected: Stack dataset. Prefer grounding to "
+                    "plexe/relbench/tasks/stack.py for equivalent user intent."
+                )
+            elif {"customer", "review", "product", "relations"}.intersection(table_set):
+                context_parts.append(
+                    "Potential canonical reference: Amazon-like schema. Check "
+                    "plexe/relbench/tasks/amazon.py before finalizing SQL semantics."
+                )
+            elif {"ad", "searchstream", "visitstream"}.intersection(table_set):
+                context_parts.append(
+                    "Potential canonical reference: Avito-like schema. Check "
+                    "plexe/relbench/tasks/avito.py for robust sparse-event SQL patterns."
+                )
+            elif {"transactions", "articles", "customers"}.intersection(table_set):
+                context_parts.append(
+                    "Potential canonical reference: HM-like schema. Check "
+                    "plexe/relbench/tasks/hm.py for task framing and temporal windows."
+                )
             
             context_parts.append("\nTable Details:")
             for table_name, table_info in schema.get("tables", {}).items():
