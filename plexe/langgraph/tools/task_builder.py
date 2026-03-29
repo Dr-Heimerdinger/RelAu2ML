@@ -74,6 +74,7 @@ def analyze_task_structure(
     import os
     import numpy as np
     import pandas as pd
+    import polars as pl
 
     try:
         csv_dir = os.path.abspath(csv_dir)
@@ -82,15 +83,21 @@ def analyze_task_structure(
         if not os.path.exists(file_path):
             return {"status": "error", "error": f"Event table CSV not found: {file_path}"}
 
-        df = pd.read_csv(file_path)
+        # Read only the columns we need via polars, then convert to pandas
+        lf = pl.scan_csv(file_path, infer_schema_length=1000, try_parse_dates=True)
+        all_cols = lf.collect_schema().names()
 
-        if entity_col not in df.columns:
+        if entity_col not in all_cols:
             return {"status": "error", "error": f"Entity column '{entity_col}' not found in {event_table}.csv"}
-        if time_col not in df.columns:
+        if time_col not in all_cols:
             return {"status": "error", "error": f"Time column '{time_col}' not found in {event_table}.csv"}
 
-        df[time_col] = pd.to_datetime(df[time_col], errors='coerce')
+        # Load only key columns for temporal/entity analysis (fast)
+        df = lf.select([entity_col, time_col]).collect().to_pandas()
+        df[time_col] = pd.to_datetime(df[time_col], errors='coerce', format='mixed')
         df = df.dropna(subset=[time_col])
+        # Keep full column list for schema hints (from polars schema, no data load)
+        _all_event_cols = all_cols
 
         task_lower = task_description.lower()
         timedelta = pd.Timedelta(days=timedelta_days)
@@ -293,10 +300,10 @@ def analyze_task_structure(
         # ================================================================
         # Section 4: Schema Hints
         # ================================================================
-        event_table_cols = list(df.columns)
+        event_table_cols = list(_all_event_cols)
         potential_join_tables = []
         try:
-            event_col_set = set(df.columns)
+            event_col_set = set(_all_event_cols)
             for f in os.listdir(csv_dir):
                 if f.endswith('.csv'):
                     other_name = f.replace('.csv', '')
@@ -333,44 +340,83 @@ def analyze_task_structure(
         CARDINALITY_MIN = 2
         CARDINALITY_MAX = 20
 
-        def _profile_categorical_columns(table_df, table_name, exclude_cols):
+        def _profile_categorical_columns_polars(csv_path, table_name, exclude_cols, col_list=None):
+            """Profile low-cardinality columns using polars lazy scan."""
             profiles = []
-            for col in table_df.columns:
-                if col in exclude_cols:
-                    continue
-                try:
-                    n_unique = table_df[col].nunique()
-                except Exception:
-                    continue
-                if n_unique < CARDINALITY_MIN or n_unique > CARDINALITY_MAX:
-                    continue
-                vc = table_df[col].value_counts(dropna=False).head(20)
-                value_dist = {str(k): int(v) for k, v in vc.items()}
-                col_lower = col.lower()
-                is_type_col = any(sig in col_lower for sig in TYPE_NAME_SIGNALS)
-                profiles.append({
-                    "column": col,
-                    "table": table_name,
-                    "n_distinct": int(n_unique),
-                    "value_distribution": value_dist,
-                    "is_likely_type_column": is_type_col,
-                })
+            try:
+                _lf = pl.scan_csv(csv_path, infer_schema_length=500)
+                _cols = col_list or _lf.collect_schema().names()
+                for col in _cols:
+                    if col in exclude_cols:
+                        continue
+                    try:
+                        n_unique = _lf.select(pl.col(col).n_unique()).collect().item()
+                    except Exception:
+                        continue
+                    if n_unique < CARDINALITY_MIN or n_unique > CARDINALITY_MAX:
+                        continue
+                    vc = (
+                        _lf.select(pl.col(col))
+                        .group_by(col).len()
+                        .sort("len", descending=True)
+                        .head(20)
+                        .collect()
+                    )
+                    value_dist = {str(r[0]): int(r[1]) for r in vc.iter_rows()}
+                    col_lower = col.lower()
+                    is_type_col = any(sig in col_lower for sig in TYPE_NAME_SIGNALS)
+                    profiles.append({
+                        "column": col,
+                        "table": table_name,
+                        "n_distinct": int(n_unique),
+                        "value_distribution": value_dist,
+                        "is_likely_type_column": is_type_col,
+                    })
+            except Exception:
+                pass
             return profiles
 
         exclude_event = {entity_col, time_col}
-        event_cat_profiles = _profile_categorical_columns(df, event_table, exclude_event)
+        event_cat_profiles = _profile_categorical_columns_polars(
+            file_path, event_table, exclude_event, _all_event_cols
+        )
 
         entity_cat_profiles = []
         if entity_table and entity_source["has_dedicated_entity_table"]:
-            try:
-                ent_file = os.path.join(csv_dir, f"{entity_table}.csv")
-                ent_df = pd.read_csv(ent_file)
-                ent_pk = _find_entity_pk(ent_df, entity_col)
+            ent_file = os.path.join(csv_dir, f"{entity_table}.csv")
+            if os.path.exists(ent_file):
+                ent_pk = None
+                try:
+                    ent_cols = pl.scan_csv(ent_file, infer_schema_length=100).collect_schema().names()
+                    ent_pk = _find_entity_pk(pd.DataFrame(columns=ent_cols), entity_col)
+                except Exception:
+                    pass
                 exclude_ent = {ent_pk} if ent_pk else set()
                 if entity_creation_col:
                     exclude_ent.add(entity_creation_col)
-                entity_cat_profiles = _profile_categorical_columns(
-                    ent_df, entity_table, exclude_ent
+                entity_cat_profiles = _profile_categorical_columns_polars(
+                    ent_file, entity_table, exclude_ent
+                )
+
+        # Profile likely join tables as well (for categorical filters such as
+        # outcomes.outcome_type). Without this, the model may infer a semantic
+        # label (e.g., "Primary Outcome") that does not exist in raw data
+        # (e.g., "Primary").
+        join_cat_profiles = []
+        for jt in potential_join_tables:
+            jt_name = jt.get("table")
+            if not jt_name or jt_name in {event_table, entity_table}:
+                continue
+            try:
+                jt_file = os.path.join(csv_dir, f"{jt_name}.csv")
+                if not os.path.exists(jt_file):
+                    continue
+                join_exclude = set(jt.get("shared_columns_with_event", []))
+                jt_cols = jt.get("columns")
+                join_cat_profiles.extend(
+                    _profile_categorical_columns_polars(
+                        jt_file, jt_name, join_exclude, jt_cols
+                    )
                 )
             except Exception:
                 pass
@@ -380,24 +426,30 @@ def analyze_task_structure(
         if entity_table and entity_source["has_dedicated_entity_table"]:
             try:
                 ent_file = os.path.join(csv_dir, f"{entity_table}.csv")
-                ent_df = pd.read_csv(ent_file)
-                ent_pk = _find_entity_pk(ent_df, entity_col)
-                if ent_pk and ent_pk in ent_df.columns:
-                    id_series = ent_df[ent_pk]
-                    null_count = int(id_series.isna().sum())
+                _ent_lf = pl.scan_csv(ent_file, infer_schema_length=500)
+                _ent_schema = _ent_lf.collect_schema()
+                _ent_cols_list = _ent_schema.names()
+                ent_pk = _find_entity_pk(pd.DataFrame(columns=_ent_cols_list), entity_col)
+                if ent_pk and ent_pk in _ent_cols_list:
+                    _agg = _ent_lf.select(
+                        pl.col(ent_pk).null_count().alias("nulls"),
+                        pl.count().alias("total"),
+                    ).collect()
+                    null_count = _agg["nulls"][0]
+                    total = _agg["total"][0]
                     if null_count > 0:
                         sentinel_warnings.append({
                             "table": entity_table, "column": ent_pk,
-                            "issue": "null_entity_ids", "count": null_count,
+                            "issue": "null_entity_ids", "count": int(null_count),
                             "recommendation": f"Filter: {ent_pk} IS NOT NULL",
                         })
-                    if pd.api.types.is_numeric_dtype(id_series):
+                    if _ent_schema[ent_pk].is_numeric():
                         for sentinel in [-1, 0]:
-                            sc = int((id_series == sentinel).sum())
-                            if 0 < sc < len(id_series) * 0.1:
+                            sc = _ent_lf.filter(pl.col(ent_pk) == sentinel).select(pl.count()).collect().item()
+                            if 0 < sc < total * 0.1:
                                 sentinel_warnings.append({
                                     "table": entity_table, "column": ent_pk,
-                                    "issue": f"sentinel_value_{sentinel}", "count": sc,
+                                    "issue": f"sentinel_value_{sentinel}", "count": int(sc),
                                     "recommendation": f"Filter: {ent_pk} != {sentinel}",
                                 })
             except Exception:
@@ -437,7 +489,7 @@ def analyze_task_structure(
             "event_table_columns": event_table_cols,
             "entity_table_columns": entity_table_cols,
             "potential_join_tables": potential_join_tables,
-            "categorical_columns": event_cat_profiles + entity_cat_profiles,
+            "categorical_columns": event_cat_profiles + entity_cat_profiles + join_cat_profiles,
             "sentinel_warnings": sentinel_warnings,
         }
 
@@ -647,6 +699,7 @@ def analyze_task_structure(
                 "Low-cardinality type/category columns detected in entity or event tables. "
                 "Review schema_hints.categorical_columns to determine if the task requires "
                 "filtering by specific values (e.g., only questions, only upvotes, only primary outcomes). "
+                "Use exact raw values from value_distribution (do not paraphrase values). "
                 "Also check schema_hints.sentinel_warnings for entity ID sentinel values to exclude."
                 if (_has_categorical or sentinel_warnings)
                 else None
@@ -788,12 +841,12 @@ def test_sql_query(
         
         conn = duckdb.connect(':memory:')
         
-        # Load all CSV files as tables
+        # Create views over CSV files (lazy -- avoids loading entire files into memory)
         for f in os.listdir(csv_dir):
             if f.endswith('.csv'):
                 table_name = f.replace('.csv', '')
                 file_path = os.path.join(csv_dir, f)
-                conn.execute(f"CREATE TABLE {table_name} AS SELECT * FROM read_csv_auto('{file_path}')")
+                conn.execute(f"CREATE VIEW {table_name} AS SELECT * FROM read_csv_auto('{file_path}')")
         
         # Create a data-aware dummy timestamp_df for SQL validation.
         # At runtime, the real timestamp_df will be provided by the task framework.
@@ -893,12 +946,45 @@ def test_sql_query(
         conn.register("timestamp_df", timestamps_dummy)
         
         result = conn.execute(query).fetchdf()
-        
+
+        warnings: List[str] = []
+        target_summary: Dict[str, Any] | None = None
+        if len(result.columns) >= 3 and len(result) > 0:
+            target_col = result.columns[2]
+            target_series = result[target_col]
+            non_null = target_series.dropna()
+            unique_non_null = int(non_null.nunique()) if len(non_null) > 0 else 0
+            target_summary = {
+                "target_col": target_col,
+                "non_null_count": int(len(non_null)),
+                "unique_non_null": unique_non_null,
+            }
+
+            if unique_non_null <= 1:
+                warnings.append(
+                    f"Target column '{target_col}' appears single-class in SQL test output "
+                    f"(unique_non_null={unique_non_null}). This often indicates an incorrect categorical "
+                    "filter/value mapping or overly restrictive WHERE conditions."
+                )
+
+            # Binary-focused check when values look like 0/1 or bool.
+            try:
+                uniques = set(non_null.astype(str).str.lower().unique().tolist())
+                binary_tokens = {"0", "1", "true", "false"}
+                if uniques and uniques.issubset(binary_tokens) and len(uniques) == 1:
+                    warnings.append(
+                        f"Binary-like target '{target_col}' has only one class ({next(iter(uniques))}) in sample output."
+                    )
+            except Exception:
+                pass
+
         return {
             "status": "success",
             "columns": list(result.columns),
             "row_count": len(result),
-            "sample_data": result.head(10).to_dict(orient='records')
+            "sample_data": result.head(10).to_dict(orient='records'),
+            "warnings": warnings,
+            "target_summary": target_summary,
         }
     except Exception as e:
         return {
@@ -928,7 +1014,8 @@ def register_task_code(
     """
     import os
     import ast
-    
+    import re
+
     # Normalize the file path
     file_path = os.path.normpath(os.path.abspath(file_path))
     
@@ -971,6 +1058,26 @@ def register_task_code(
             "error": "Link prediction task must inherit RecommendationTask, not EntityTask. "
                      "Fix the class declaration and re-register.",
         }
+
+    if task_type != "link_prediction" and re.search(
+        r"class\s+GenTask\s*\(\s*RecommendationTask\s*\)", sanitized_code
+    ):
+        return {
+            "status": "error",
+            "error": "Non-link task types must inherit EntityTask, not RecommendationTask. "
+                     "Use EntityTask with columns [time_col, entity_col, target_col] for "
+                     "binary/regression/multiclass. Re-register with the correct base class.",
+        }
+
+    if task_type == "binary_classification":
+        metric_names = re.findall(
+            r"\b(roc_auc|average_precision|accuracy|f1|ap|auroc)\b", sanitized_code
+        )
+        if not metric_names:
+            syntax_warnings.append(
+                "Binary classification tasks usually need metrics including roc_auc, "
+                "average_precision, accuracy, or f1 in `metrics = [...]` for evaluation."
+            )
 
     if task_type == "link_prediction" and "eval_k" not in sanitized_code:
         import re
@@ -1108,6 +1215,20 @@ def register_task_code(
                         match.group(0) + f"\n{indent}num_eval_timestamps = 40",
                     )
 
+    if re.search(r"class\s+GenTask\s*\(\s*RecommendationTask\s*\)", sanitized_code):
+        _ne_re = re.compile(
+            r"^([ \t]*)num_eval_timestamps\s*=\s*(\d+)\s*$",
+            re.MULTILINE,
+        )
+
+        def _rec_ne_fix(m):
+            indent, val = m.group(1), m.group(2)
+            if int(val) != 1:
+                return f"{indent}num_eval_timestamps = 1"
+            return m.group(0)
+
+        sanitized_code = _ne_re.sub(_rec_ne_fix, sanitized_code)
+
     with open(file_path, 'w') as f:
         f.write(sanitized_code)
 
@@ -1220,33 +1341,55 @@ def validate_dataset_timestamps(
                 f"Fix: choose timestamps so that test_timestamp - val_timestamp >= {timedelta_days} days."
             )
 
-        # Check against actual data range if CSV files available
+        # Check against actual data range using polars lazy scan (fast)
         data_min_date = None
         data_max_date = None
         if csv_dir and os.path.exists(csv_dir):
+            import polars as pl
+            _dt_hints = ('date', 'time', 'created', 'updated', 'timestamp', 'modified')
             for f in os.listdir(csv_dir):
-                if f.endswith('.csv'):
-                    try:
-                        df = pd.read_csv(os.path.join(csv_dir, f))
-                        for col in df.columns:
-                            col_lower = col.lower()
-                            if col_lower.endswith('id') or col_lower == 'id':
+                if not f.endswith('.csv'):
+                    continue
+                try:
+                    lf = pl.scan_csv(os.path.join(csv_dir, f), infer_schema_length=1000, try_parse_dates=True)
+                    schema = lf.collect_schema()
+                    for col_name in schema.names():
+                        col_lower = col_name.lower()
+                        if col_lower.endswith('id') or col_lower == 'id':
+                            continue
+                        dt = schema[col_name]
+                        is_date = dt in (pl.Date, pl.Datetime) or str(dt).startswith("Datetime")
+                        if not is_date and not any(h in col_lower for h in _dt_hints):
+                            continue
+                        if is_date:
+                            agg = lf.select(
+                                pl.col(col_name).min().alias("mn"),
+                                pl.col(col_name).max().alias("mx"),
+                            ).collect()
+                            mn, mx = agg["mn"][0], agg["mx"][0]
+                            if mn is not None and mx is not None:
+                                mn_ts = pd.Timestamp(mn)
+                                mx_ts = pd.Timestamp(mx)
+                                if mn_ts.year >= 1900 and mx_ts.year <= 2100:
+                                    if data_min_date is None or mn_ts < data_min_date:
+                                        data_min_date = mn_ts
+                                    if data_max_date is None or mx_ts > data_max_date:
+                                        data_max_date = mx_ts
+                        else:
+                            sample = lf.select(pl.col(col_name).drop_nulls()).head(200).collect().to_series()
+                            if len(sample) == 0:
                                 continue
-                            try:
-                                dates = pd.to_datetime(df[col], errors='coerce')
-                                if dates.notna().sum() > len(df) * 0.5:
-                                    col_min = dates.min()
-                                    col_max = dates.max()
-                                    if pd.notna(col_min) and col_min.year >= 1900:
-                                        if data_min_date is None or col_min < data_min_date:
-                                            data_min_date = col_min
-                                    if pd.notna(col_max) and col_max.year <= 2100:
-                                        if data_max_date is None or col_max > data_max_date:
-                                            data_max_date = col_max
-                            except Exception:
-                                pass
-                    except Exception:
-                        pass
+                            parsed = pd.to_datetime(sample.to_pandas(), errors='coerce', format='mixed').dropna()
+                            if len(parsed) < len(sample) * 0.5:
+                                continue
+                            mn_ts, mx_ts = parsed.min(), parsed.max()
+                            if mn_ts.year >= 1900 and mx_ts.year <= 2100:
+                                if data_min_date is None or mn_ts < data_min_date:
+                                    data_min_date = mn_ts
+                                if data_max_date is None or mx_ts > data_max_date:
+                                    data_max_date = mx_ts
+                except Exception:
+                    pass
 
             if data_min_date and data_max_date:
                 if val_timestamp < data_min_date or val_timestamp > data_max_date:

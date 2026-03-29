@@ -60,8 +60,46 @@ class Table:
             "time_col": self.time_col,
         }
 
-        # Convert DataFrame to a PyArrow Table
-        table = pa.Table.from_pandas(self.df, preserve_index=False)
+        # Convert DataFrame to a PyArrow Table.
+        # Some raw CSVs can contain "object" columns with mixed Python types
+        # (e.g., strings/bytes/floats/NaN in the same column). pyarrow may fail
+        # hard while inferring/constructing the array.
+        try:
+            table = pa.Table.from_pandas(self.df, preserve_index=False)
+        except pa.ArrowTypeError as e:
+            # Fallback: normalize object columns into consistent nullable strings.
+            # First try to only normalize the column mentioned in the error message
+            # (e.g. "Conversion failed for column zip with type object") to reduce
+            # overhead on large datasets.
+            df = self.df.copy()
+
+            def _normalize_object_value(v):
+                if pd.isna(v):
+                    return None
+                if isinstance(v, (bytes, bytearray)):
+                    try:
+                        return v.decode("utf-8", errors="ignore")
+                    except Exception:
+                        return str(v)
+                if isinstance(v, str):
+                    return v
+                # Covers floats/ints/bools/other objects; stringify is safe for Parquet.
+                return str(v)
+
+            import re
+
+            msg = str(e)
+            m = re.search(r"column\s+([A-Za-z0-9_]+)", msg)
+            if m:
+                target_cols = {m.group(1)}
+            else:
+                target_cols = set(df.columns[df.dtypes == "object"])
+
+            for col in df.columns:
+                if col in target_cols and df[col].dtype == "object":
+                    df[col] = df[col].map(_normalize_object_value)
+
+            table = pa.Table.from_pandas(df, preserve_index=False)
 
         # Add metadata to the PyArrow Table
         metadata_bytes = {

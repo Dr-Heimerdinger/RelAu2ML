@@ -1,6 +1,6 @@
-I am working with the data is loaded into the `amazon` database (connection string: `postgresql+psycopg2://mlflow:mlflow@postgres:5432/amazon`).
+I am working with the data is loaded into the `amazon_full` database (connection string: `postgresql+psycopg2://mlflow:mlflow@postgres:5432/amazon_full`).
 I want to define a predictive task on this relational database.
 - Database Description: The Amazon e-commerce relational database is a product and user purchasing behavior across Amazon's e-commerce platform. Notably, it contains rich information about each product and transactions. The product table includes price and category information; the review table includes overall rating, whether the user has actually bought the product, and the text of the review itself. We use the subset of book-related products.
 - Task definition: For each user, predict the $ value of the total number of products they buy and review in the next 3 months.
 - Evaluation metric: Mean Absolute Error (MAE).
-I don't have any requirements, if you need them you can set by default automatically.
+Please follow the canonical RelBench benchmark definition for `rel-amazon/user-ltv` exactly (official target column name and time window), and avoid custom reinterpretation.

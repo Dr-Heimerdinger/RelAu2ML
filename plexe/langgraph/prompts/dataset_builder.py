@@ -44,7 +44,7 @@ class GenDataset(Dataset):
 ```
 
 ## Key Rules
-
+- Refer to relbench for target column name and timedelta.
 - val_timestamp and test_timestamp MUST be pd.Timestamp("YYYY-MM-DD"), never None.
 - Use pd.to_datetime(col, format='mixed', errors='coerce') for date parsing.
 - Replace missing markers: df.replace(r"^\\\\N$", np.nan, regex=True).

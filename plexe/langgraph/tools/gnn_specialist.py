@@ -60,13 +60,29 @@ def generate_training_script(
     }
     tune_metric = METRIC_NAME_MAP.get(tune_metric.lower(), tune_metric)
 
+    # Entity-level classification metrics are incompatible with the link-prediction
+    # training template (top-k eval). Auto-switch task_type when the metric implies it.
+    _entity_cls_metrics = {
+        "roc_auc",
+        "average_precision",
+        "f1",
+        "accuracy",
+    }
+    if task_type == "link_prediction" and tune_metric in _entity_cls_metrics:
+        task_type = "binary_classification"
+        if not higher_is_better and tune_metric in ("roc_auc", "average_precision", "f1", "accuracy"):
+            higher_is_better = True
+        if out_channels != 1:
+            out_channels = 1
+
     working_dir = os.path.abspath(working_dir)
     
-    # Use csv_dir from parameter or default to working_dir/csv_files
-    if csv_dir is None:
+    # Use csv_dir from parameter or default to working_dir/csv_files.
+    # The agent may pass literal strings like "None"/"null" - treat them as missing.
+    if csv_dir is None or str(csv_dir).strip().lower() in {"", "none", "null"}:
         csv_dir = f"{working_dir}/csv_files"
     else:
-        csv_dir = os.path.abspath(csv_dir)
+        csv_dir = os.path.abspath(str(csv_dir))
 
     if not os.path.isdir(csv_dir):
         return {
